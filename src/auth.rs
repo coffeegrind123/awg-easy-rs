@@ -1,0 +1,40 @@
+use anyhow::Result;
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+
+/// Hash a plaintext password using Argon2id with default parameters.
+pub fn hash_password(pw: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2
+        .hash_password(pw.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("argon2 hash failed: {e}"))?;
+    Ok(hash.to_string())
+}
+
+/// Verify a plaintext password against an Argon2id hash.
+pub fn verify_password(pw: &str, hash: &str) -> Result<bool> {
+    let parsed_hash = PasswordHash::new(hash)
+        .map_err(|e| anyhow::anyhow!("invalid password hash: {e}"))?;
+    Ok(Argon2::default()
+        .verify_password(pw.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+
+/// Generate a session token: 256 random bytes encoded as 512 hex characters.
+pub fn generate_session_token() -> String {
+    let mut bytes = [0u8; 256];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Compute the SHA-256 hex digest of a string.
+pub fn sha256(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}

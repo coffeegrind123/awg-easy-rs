@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Debug logs
+*.log
+
+# Backup files
+*.bak
+*.orig
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Linux
+.directory
+
+# WireGuard config files (generated at runtime, contain private keys)
+*.conf
+!docker-compose.yml

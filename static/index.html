@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
+<title>AmneziaWG Easy</title>
+<style>
+:root {
+  --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460;
+  --fg: #e0e0e0; --fg2: #a0a0b0; --fg3: #707080;
+  --accent: #FBB26A; --accent2: #e8923a;
+  --red: #ef4444; --green: #22c55e; --yellow: #eab308;
+  --border: #2a2a4a; --radius: 8px; --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', monospace;
+}
+[data-theme="light"] {
+  --bg: #f5f5f5; --bg2: #ffffff; --bg3: #e8e8f0;
+  --fg: #1a1a2e; --fg2: #4a4a5a; --fg3: #6a6a7a;
+  --accent: #d4760a; --accent2: #b86508;
+  --border: #d0d0e0;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg); color: var(--fg); min-height: 100vh; }
+.container { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 0; position: sticky; top: 0; z-index: 100; }
+header .container { display: flex; align-items: center; gap: 16px; }
+.logo { font-size: 20px; font-weight: 700; color: var(--accent); text-decoration: none; display: flex; align-items: center; gap: 8px; }
+.logo svg { width: 28px; height: 28px; }
+.nav { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+.nav a, .nav button { color: var(--fg2); text-decoration: none; padding: 6px 12px; border-radius: var(--radius); border: none; background: none; cursor: pointer; font-size: 14px; font-family: var(--font); }
+.nav a:hover, .nav button:hover { background: var(--bg3); color: var(--fg); }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius); font-size: 14px; font-weight: 500; cursor: pointer; border: none; font-family: var(--font); transition: all 0.15s; }
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-secondary { background: var(--bg3); color: var(--fg); }
+.btn-secondary:hover { background: var(--border); }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 13px; }
+input, textarea, select { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; color: var(--fg); font-size: 14px; font-family: var(--font); width: 100%; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+label { display: block; font-size: 13px; color: var(--fg2); margin-bottom: 4px; font-weight: 500; }
+.form-group { margin-bottom: 16px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+.card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.card-title { font-weight: 600; font-size: 16px; }
+.panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin: 24px 0; }
+.page { display: none; }
+.page.active { display: block; padding: 24px 0; }
+.toggle { position: relative; display: inline-block; width: 44px; height: 24px; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle span { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: var(--fg3); border-radius: 12px; transition: 0.2s; }
+.toggle input:checked + span { background: var(--accent); }
+.toggle span:before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
+.toggle input:checked + span:before { transform: translateX(20px); }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
+.modal-overlay.active { display: flex; }
+.modal { background: var(--bg2); border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+.modal h3 { margin-bottom: 16px; }
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 20px; border-radius: var(--radius); color: #fff; font-size: 14px; animation: slideIn 0.3s ease; max-width: 360px; }
+.toast.error { background: var(--red); }
+.toast.success { background: var(--green); }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.status-dot.online { background: var(--green); animation: pulse 2s infinite; }
+.status-dot.offline { background: var(--fg3); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.flex { display: flex; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+.mt-16 { margin-top: 16px; }
+.mb-16 { margin-bottom: 16px; }
+.text-sm { font-size: 13px; }
+.text-muted { color: var(--fg2); }
+.text-accent { color: var(--accent); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.code-block { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+.sidebar { display: grid; grid-template-columns: 200px 1fr; gap: 24px; }
+.sidebar-nav a { display: block; padding: 8px 12px; border-radius: var(--radius); color: var(--fg2); text-decoration: none; margin-bottom: 4px; font-size: 14px; }
+.sidebar-nav a:hover, .sidebar-nav a.active { background: var(--bg3); color: var(--fg); }
+.search-bar { position: relative; flex: 1; max-width: 300px; }
+.search-bar input { padding-left: 32px; }
+.search-bar svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg3); }
+.otl-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin-top: 8px; font-size: 13px; }
+.otl-box .countdown { color: var(--accent); font-weight: 600; }
+.steps { display: flex; gap: 8px; margin-bottom: 24px; }
+.step { flex: 1; height: 4px; background: var(--border); border-radius: 2px; }
+.step.done { background: var(--accent); }
+.step.active { background: var(--accent2); }
+.loading { text-align: center; padding: 40px; color: var(--fg2); }
+.empty { text-align: center; padding: 40px; color: var(--fg2); }
+.empty h3 { color: var(--fg); margin-bottom: 8px; }
+svg.icon { width: 18px; height: 18px; }
+.chart-svg { width: 100%; height: 40px; }
+label { display: inline-flex; align-items: center; gap: 2px; }
+.tip { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); color: #000; font-size: 9px; font-weight: 800; cursor: help; margin-left: 2px; position: relative; flex-shrink: 0; line-height: 1; opacity: 0.8; transition: opacity 0.15s; }
+.tip:hover { opacity: 1; }
+.tip:hover::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 400; white-space: normal; max-width: 280px; width: max-content; z-index: 500; pointer-events: none; text-align: left; line-height: 1.4; }
+.tip:hover::before { content: ''; position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); border: 4px solid transparent; border-top-color: var(--fg); z-index: 500; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<header id="header" style="display:none">
+  <div class="container">
+    <a href="#/" class="logo" onclick="navigate('/')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+      AmneziaWG Easy
+    </a>
+    <div class="nav" id="nav-links"></div>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Login -->
+  <div id="page-login" class="page">
+    <div class="panel" style="max-width:400px;margin:80px auto">
+      <h2 style="text-align:center;margin-bottom:8px">Sign In</h2>
+      <p style="text-align:center;color:var(--fg2);margin-bottom:24px">AmneziaWG VPN Manager</p>
+      <div id="insecure-warning" style="display:none;background:var(--yellow);color:#000;padding:8px 12px;border-radius:var(--radius);margin-bottom:16px;font-size:13px">
+        Insecure connection. Use HTTPS for production.
+      </div>
+      <form id="login-form" onsubmit="doLogin(event)">
+        <div class="form-group"><label>Username</label><input type="text" id="login-user" required autofocus></div>
+        <div class="form-group"><label>Password</label><input type="password" id="login-pass" required></div>
+        <div id="totp-group" class="form-group" style="display:none"><label>TOTP Code</label><input type="text" id="login-totp" maxlength="6" pattern="[0-9]{6}"></div>
+        <div class="form-group flex gap-8" style="align-items:center"><input type="checkbox" id="login-remember" style="width:auto"><label style="margin:0">Remember me</label></div>
+        <button type="submit" class="btn btn-primary" style="width:100%">Sign In</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Setup -->
+  <div id="page-setup" class="page">
+    <div class="panel" style="max-width:500px;margin:60px auto">
+      <h2>Setup Wizard</h2>
+      <div class="steps" id="setup-steps"><div class="step active"></div><div class="step"></div><div class="step"></div><div class="step"></div></div>
+      <div id="setup-step1">
+        <p class="mb-16">Welcome! Let's configure your AmneziaWG VPN.</p>
+        <button class="btn btn-primary" onclick="setupGo(2)">Get Started</button>
+      </div>
+      <div id="setup-step2" style="display:none">
+        <form onsubmit="setupCreateUser(event)">
+          <div class="form-group"><label title="Admin account username for logging into the web UI">Username</label><input type="text" id="setup-user" required></div>
+          <div class="form-group"><label title="Password for the admin account. Must be at least 6 characters">Password</label><input type="password" id="setup-pass" required></div>
+          <div class="form-group"><label title="Re-enter the password to confirm">Confirm Password</label><input type="password" id="setup-pass2" required></div>
+          <div class="flex gap-8" style="justify-content:space-between">
+            <button type="button" class="btn btn-secondary" onclick="setupGo(1)">← Back</button>
+            <button type="submit" class="btn btn-primary">Create Account</button>
+          </div>
+        </form>
+      </div>
+      <div id="setup-step4" style="display:none">
+        <form onsubmit="setupFinish(event)">
+          <div class="form-group"><label title="Public IP address or hostname that VPN clients will connect to">Server Hostname/IP</label><input type="text" id="setup-host" required placeholder="your-server.com"></div>
+          <div class="form-group"><label title="UDP port for AmneziaWG connections. Default: 51820">AmneziaWG Port</label><input type="number" id="setup-port" value="51820" required></div>
+          <div class="flex gap-8" style="justify-content:space-between">
+            <button type="button" class="btn btn-secondary" onclick="setupGo(2)">← Back</button>
+            <button type="submit" class="btn btn-primary">Complete Setup</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Client List -->
+  <div id="page-clients" class="page">
+    <div class="flex-between mb-16">
+      <h2>Clients</h2>
+      <div class="flex gap-8">
+        <div class="search-bar"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><input type="text" id="client-search" placeholder="Search clients..." oninput="renderClients()"></div>
+        <button class="btn btn-primary" onclick="showCreateModal()">+ New Client</button>
+      </div>
+    </div>
+    <div id="client-list"></div>
+  </div>
+
+  <!-- Client Edit -->
+  <div id="page-client-edit" class="page">
+    <div class="flex gap-8 mb-16" style="align-items:center">
+      <a href="#/" class="btn btn-secondary btn-sm" onclick="navigate('/')">← Back</a>
+      <h2 id="edit-title">Edit Client</h2>
+    </div>
+    <div class="panel" id="edit-form"></div>
+  </div>
+
+  <!-- Account -->
+  <div id="page-me" class="page">
+    <h2 class="mb-16">Account</h2>
+    <div class="panel">
+      <h3 class="mb-16">Profile</h3>
+      <form onsubmit="saveProfile(event)">
+        <div class="form-group"><label>Display Name</label><input type="text" id="me-name"></div>
+        <div class="form-group"><label>Email</label><input type="email" id="me-email"></div>
+        <button class="btn btn-primary">Save</button>
+      </form>
+    </div>
+    <div class="panel mt-16">
+      <h3 class="mb-16">Change Password</h3>
+      <form onsubmit="changePassword(event)">
+        <div class="form-group"><label>Current Password</label><input type="password" id="pw-current" required></div>
+        <div class="form-group"><label>New Password</label><input type="password" id="pw-new" required></div>
+        <div class="form-group"><label>Confirm Password</label><input type="password" id="pw-confirm" required></div>
+        <button class="btn btn-primary">Update Password</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Admin -->
+  <div id="page-admin" class="page">
+    <h2 class="mb-16">Admin Panel</h2>
+    <div class="sidebar">
+      <div class="sidebar-nav">
+        <a href="#/admin" class="active" onclick="showAdminTab('general',event)">General</a>
+        <a href="#/admin" onclick="showAdminTab('config',event)">Config</a>
+        <a href="#/admin" onclick="showAdminTab('interface',event)">Interface</a>
+        <a href="#/admin" onclick="showAdminTab('hooks',event)">Hooks</a>
+      </div>
+      <div id="admin-content"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-overlay" id="modal-create">
+  <div class="modal">
+    <h3>New Client</h3>
+    <form onsubmit="createClient(event)">
+      <div class="form-group"><label>Name</label><input type="text" id="create-name" required></div>
+      <div class="form-group"><label>Expire Date (optional)</label><input type="date" id="create-expires"></div>
+      <div class="flex gap-8" style="justify-content:flex-end">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-create')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+<div class="modal-overlay" id="modal-qr">
+  <div class="modal">
+    <h3>QR Code</h3>
+    <div id="qr-image" style="text-align:center"></div>
+    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
+      <button class="btn btn-secondary" onclick="copyQR()">Copy PNG</button>
+      <button class="btn btn-primary" onclick="downloadQR()">Download PNG</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="modal-config">
+  <div class="modal" style="max-width:600px">
+    <h3>Configuration</h3>
+    <div class="code-block" id="config-text"></div>
+    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
+      <button class="btn btn-primary" onclick="copyConfig()">Copy</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="modal-delete">
+  <div class="modal">
+    <h3>Delete Client</h3>
+    <p>Are you sure? This cannot be undone.</p>
+    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
+      <button class="btn btn-secondary" onclick="closeModal('modal-delete')">Cancel</button>
+      <button class="btn btn-danger" id="delete-confirm-btn">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ===================== STATE =====================
+let USER = null;
+let IN_SESSION_CHECK = false;
+let CLIENTS = [];
+let CLIENT_PREV = {};
+let ADMIN_TAB = 'general';
+let SETUP_STEP = 1;
+let TOTAL_STEPS = 4;
+
+// ===================== HELPERS =====================
+function $(id) { return document.getElementById(id); }
+function $$(sel) { return document.querySelectorAll(sel); }
+
+function showToast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1000, sizes = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(decimals) + ' ' + sizes[i];
+}
+
+function timeAgo(date) {
+  if (!date) return 'Never';
+  const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
+  if (seconds < 60) return 'just now';
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return mins + 'm ago';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + 'h ago';
+  return Math.floor(hours / 24) + 'd ago';
+}
+
+function sanitize(str) {
+  return str.replace(/[^a-zA-Z0-9_=+.-]/g, '-').substring(0, 32);
+}
+
+function isConnected(handshake) {
+  if (!handshake) return false;
+  return (Date.now() - new Date(handshake).getTime()) < 180000;
+}
+
+// ===================== API =====================
+async function api(method, path, body) {
+  const opts = { method, credentials: 'include', headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  if (res.status === 401) { USER = null; if (!IN_SESSION_CHECK) navigate('/login'); return null; }
+  if (!res.ok) { const err = await res.json().catch(() => ({error: res.statusText})); throw new Error(err.error || err.message || res.statusText); }
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  return res.text();
+}
+const GET = (p) => api('GET', p);
+const POST = (p, b) => api('POST', p, b);
+const DEL = (p) => api('DELETE', p);
+
+// ===================== ROUTING =====================
+function navigate(hash) {
+  window.location.hash = hash;
+}
+
+function route() {
+  const hash = window.location.hash || '#/';
+  const path = hash.slice(1);
+
+  // Hide all pages
+  $$('.page').forEach(p => p.classList.remove('active'));
+
+  // Check auth first (skip for login, setup, and cnf routes)
+  if (path !== '/login' && path !== '/setup' && !path.startsWith('/setup') && !path.startsWith('/cnf')) {
+    checkSession().then(ok => {
+      if (!ok) return;
+      routeInternal(path);
+    });
+  } else {
+    routeInternal(path);
+  }
+}
+
+function routeInternal(path) {
+  if (path === '/login') {
+    $('header').style.display = 'none';
+    $('page-login').classList.add('active');
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      $('insecure-warning').style.display = 'block';
+    }
+  } else if (path === '/setup' || path.startsWith('/setup')) {
+    $('header').style.display = 'none';
+    $('page-setup').classList.add('active');
+    loadSetup();
+  } else if (path === '/') {
+    $('header').style.display = 'block';
+    $('page-clients').classList.add('active');
+    renderNav();
+    refreshClients();
+  } else if (path.startsWith('/clients/')) {
+    $('header').style.display = 'block';
+    $('page-client-edit').classList.add('active');
+    renderNav();
+    const id = path.split('/')[2];
+    loadClientEdit(id);
+  } else if (path === '/me') {
+    $('header').style.display = 'block';
+    $('page-me').classList.add('active');
+    renderNav();
+    loadMe();
+  } else if (path === '/admin') {
+    $('header').style.display = 'block';
+    $('page-admin').classList.add('active');
+    renderNav();
+    showAdminTab(ADMIN_TAB);
+  } else {
+    $('header').style.display = 'block';
+    $('page-clients').classList.add('active');
+    renderNav();
+    refreshClients();
+  }
+}
+
+window.addEventListener('hashchange', route);
+window.addEventListener('load', route);
+
+// Auto-inject tooltip icons on labels with title attribute
+function injectTooltips() {
+  setTimeout(() => {
+    document.querySelectorAll('label[title]').forEach(l => {
+      if (!l.querySelector('.tip')) {
+        const t = document.createElement('span');
+        t.className = 'tip'; t.dataset.tip = l.title; t.textContent = '?';
+        l.title = ''; l.appendChild(t);
+      }
+    });
+  }, 100);
+}
+window.addEventListener('load', injectTooltips);
+
+// ===================== AUTH =====================
+async function checkSession() {
+  IN_SESSION_CHECK = true;
+  try {
+    const data = await GET('/api/session');
+    if (data && data.user) {
+      IN_SESSION_CHECK = false;
+      USER = data.user;
+      return true;
+    }
+  } catch(e) {}
+  USER = null;
+  // Check if setup is needed before redirecting (but not from login page)
+  if (window.location.hash !== '#/login') {
+    try {
+      const info = await GET('/api/information');
+      if (info && info.setupNeeded) {
+        IN_SESSION_CHECK = false;
+        navigate('/setup');
+        return false;
+      }
+    } catch(e) {}
+  }
+  IN_SESSION_CHECK = false;
+  navigate('/login');
+  return false;
+}
+
+async function doLogin(e) {
+  e.preventDefault();
+  const body = {
+    username: $('login-user').value,
+    password: $('login-pass').value,
+    remember: $('login-remember').checked
+  };
+  try {
+    const res = await POST('/api/session', body);
+    if (res && res.status === 'TOTP_REQUIRED') {
+      $('totp-group').style.display = 'block';
+      $('login-totp').focus();
+      showToast('TOTP code required', 'error');
+    } else if (res && res.user) {
+      USER = res.user;
+      navigate('/');
+    }
+  } catch(e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function doLogout() {
+  await DEL('/api/session').catch(() => {});
+  USER = null;
+  navigate('/login');
+}
+
+function renderNav() {
+  if (!USER) return;
+  $('nav-links').innerHTML = `
+    <a href="#/" onclick="navigate('/')">Clients</a>
+    ${USER.role === 1 ? '<a href="#/admin" onclick="navigate(\'/admin\')">Admin</a>' : ''}
+    <a href="#/me" onclick="navigate(\'/me\')">Account</a>
+    <button onclick="toggleTheme()" title="Toggle theme">☀</button>
+    <button onclick="doLogout()">Logout</button>
+  `;
+}
+
+// ===================== THEME =====================
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+// ===================== CLIENTS =====================
+let clientRefreshTimer = null;
+
+async function refreshClients() {
+  try {
+    const data = await GET('/api/client');
+    if (!data) return;
+    // Compute transfer rates
+    const now = Date.now();
+    for (const c of data) {
+      const prev = CLIENT_PREV[c.id];
+      if (prev && prev.transferRx != null && c.transferRx != null) {
+        c.rxRate = (c.transferRx - prev.transferRx) / 5;
+        c.txRate = (c.transferTx - prev.transferTx) / 5;
+      }
+      CLIENT_PREV[c.id] = { ...c, ts: now };
+    }
+    CLIENTS = data;
+    renderClients();
+  } catch(e) { showToast(e.message, 'error'); }
+  clientRefreshTimer = setTimeout(refreshClients, 5000);
+}
+
+let clientFilter = '';
+$('client-search').addEventListener('input', function() {
+  clientFilter = this.value.toLowerCase();
+  renderClients();
+});
+
+function renderClients() {
+  const el = $('client-list');
+  let filtered = CLIENTS;
+  if (clientFilter) filtered = CLIENTS.filter(c => c.name.toLowerCase().includes(clientFilter));
+
+  if (CLIENTS.length === 0) {
+    el.innerHTML = '<div class="empty"><h3>No clients yet</h3><p>Create your first client to get started.</p></div>';
+    return;
+  }
+
+  el.innerHTML = filtered.map(c => {
+    const online = isConnected(c.latestHandshakeAt);
+    const expiresText = c.expiresAt ? new Date(c.expiresAt).toLocaleDateString() : 'Permanent';
+    const rxRate = c.rxRate ? formatBytes(c.rxRate) + '/s' : '—';
+    const txRate = c.txRate ? formatBytes(c.txRate) + '/s' : '—';
+
+    return `<div class="card">
+      <div class="card-header">
+        <span class="status-dot ${online ? 'online' : 'offline'}"></span>
+        <div style="flex:1">
+          <div class="flex-between">
+            <span class="card-title">${esc(c.name)}</span>
+            <label class="toggle" onclick="event.stopPropagation()">
+              <input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="toggleClient(${c.id}, this.checked)">
+              <span></span>
+            </label>
+          </div>
+          <div class="text-sm text-muted">
+            ${esc(c.ipv4Address || '—')} ${c.ipv6Address ? '| ' + esc(c.ipv6Address) : ''}
+          </div>
+          <div class="text-sm text-muted">
+            Last seen: ${timeAgo(c.latestHandshakeAt)} · ${expiresText}
+          </div>
+          <div class="text-sm" style="margin-top:4px">
+            ↓ ${txRate} · ↑ ${rxRate}
+          </div>
+          ${c.oneTimeLink ? `<div class="otl-box mono">${esc(c.oneTimeLink.oneTimeLink)} <span class="countdown" id="otl-${c.id}"></span></div>` : ''}
+        </div>
+      </div>
+      <div class="flex gap-8 mt-8">
+        <button class="btn btn-secondary btn-sm" onclick="navigate('/clients/${c.id}')">Edit</button>
+        <button class="btn btn-secondary btn-sm" onclick="showQR(${c.id})">QR</button>
+        <a class="btn btn-secondary btn-sm" href="/api/client/${c.id}/configuration" download>Download</a>
+        <button class="btn btn-secondary btn-sm" onclick="generateOTL(${c.id})">Link</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Update OTL countdowns
+  for (const c of CLIENTS) {
+    if (c.oneTimeLink) {
+      const el = $('otl-' + c.id);
+      if (el) {
+        const exp = new Date(c.oneTimeLink.expiresAt).getTime();
+        const update = () => {
+          const secs = Math.max(0, Math.floor((exp - Date.now()) / 1000));
+          el.textContent = Math.floor(secs/60) + ':' + String(secs%60).padStart(2,'0');
+          if (secs > 0) setTimeout(update, 1000);
+        };
+        update();
+      }
+    }
+  }
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function escJs(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
+
+async function toggleClient(id, enabled) {
+  try {
+    await POST('/api/client/' + id + '/' + (enabled ? 'enable' : 'disable'));
+    refreshClients();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function showCreateModal() { $('modal-create').classList.add('active'); }
+function closeModal(id) { $(id).classList.remove('active'); }
+
+async function createClient(e) {
+  e.preventDefault();
+  const body = { name: $('create-name').value };
+  const expires = $('create-expires').value;
+  if (expires) body.expiresAt = new Date(expires).toISOString();
+  try {
+    await POST('/api/client', body);
+    closeModal('modal-create');
+    showToast('Client created', 'success');
+    refreshClients();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function showQR(id) {
+  try {
+    const svg = await GET('/api/client/' + id + '/qrcode.svg');
+    $('qr-image').innerHTML = svg;
+    $('qr-image').dataset.clientId = id;
+    $('modal-qr').classList.add('active');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function copyQR() {
+  const svg = $('qr-image').querySelector('svg');
+  if (!svg) return;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.width; canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
+    canvas.toBlob(async blob => {
+      await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+      showToast('QR copied', 'success');
+    });
+  };
+  img.src = 'data:image/svg+xml;base64,' + btoa(new XMLSerializer().serializeToString(svg));
+}
+
+function downloadQR() {
+  const svg = $('qr-image').querySelector('svg');
+  if (!svg) return;
+  const blob = new Blob([new XMLSerializer().serializeToString(svg)], {type: 'image/svg+xml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'qrcode.svg'; a.click();
+}
+
+async function generateOTL(id) {
+  try {
+    await POST('/api/client/' + id + '/generateOneTimeLink');
+    showToast('One-time link generated', 'success');
+    refreshClients();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function showConfig(id) {
+  try {
+    const config = await GET('/api/client/' + id + '/configuration');
+    $('config-text').textContent = config;
+    $('modal-config').classList.add('active');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function copyConfig() {
+  navigator.clipboard.writeText($('config-text').textContent);
+  showToast('Copied', 'success');
+}
+
+// ===================== CLIENT EDIT =====================
+async function loadClientEdit(id) {
+  try {
+    const c = await GET('/api/client/' + id);
+    if (!c) return;
+    $('edit-title').textContent = c.name;
+    $('edit-form').innerHTML = `
+      <div class="form-group"><label>Name</label><input type="text" id="edit-name" value="${esc(c.name||'')}"></div>
+      <div class="grid-2">
+        <div class="form-group"><label>IPv4 Address</label><input type="text" id="edit-ipv4" value="${esc(c.ipv4Address||'')}"></div>
+        <div class="form-group"><label>IPv6 Address</label><input type="text" id="edit-ipv6" value="${esc(c.ipv6Address||'')}"></div>
+      </div>
+      <div class="form-group"><label>Enabled</label><label class="toggle"><input type="checkbox" id="edit-enabled" ${c.enabled?'checked':''}><span></span></label></div>
+      <div class="form-group"><label>Expire Date</label><input type="date" id="edit-expires" value="${c.expiresAt ? c.expiresAt.slice(0,10) : ''}"></div>
+      <div class="form-group"><label>DNS Servers (comma separated)</label><input type="text" id="edit-dns" value="${esc((c.dns||[]).join(', '))}"></div>
+      <div class="grid-2">
+        <div class="form-group"><label>MTU</label><input type="number" id="edit-mtu" value="${c.mtu||1420}"></div>
+        <div class="form-group"><label>Persistent Keepalive</label><input type="number" id="edit-keepalive" value="${c.persistentKeepalive||0}"></div>
+      </div>
+      <div class="form-group"><label>Allowed IPs (comma separated)</label><input type="text" id="edit-allowedips" value="${esc((c.allowedIps||[]).join(', '))}"></div>
+      <h4 class="mt-16 mb-8">AmneziaWG Obfuscation (per-client override)</h4>
+      <div class="grid-2">
+        <div class="form-group"><label>Jc</label><input type="number" id="edit-jc" value="${c.jC||''}"></div>
+        <div class="form-group"><label>Jmin</label><input type="number" id="edit-jmin" value="${c.jMin||''}"></div>
+      </div>
+      <div class="form-group"><label>Jmax</label><input type="number" id="edit-jmax" value="${c.jMax||''}"></div>
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="saveClient(${id})">Save</button>
+        <button class="btn btn-secondary" onclick="showConfig(${id})">View Config</button>
+        <a class="btn btn-secondary" href="/api/client/${id}/configuration" download>Download</a>
+        <button class="btn btn-danger" onclick="confirmDelete(${id}, '${escJs(c.name||'')}')">Delete</button>
+      </div>
+    `;
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveClient(id) {
+  const body = {
+    name: $('edit-name').value,
+    enabled: $('edit-enabled').checked,
+    ipv4Address: $('edit-ipv4').value,
+    ipv6Address: $('edit-ipv6').value,
+    mtu: parseInt($('edit-mtu').value) || 1420,
+    persistentKeepalive: parseInt($('edit-keepalive').value) || 0,
+    dns: $('edit-dns').value.split(',').map(s => s.trim()).filter(Boolean),
+    allowedIps: $('edit-allowedips').value.split(',').map(s => s.trim()).filter(Boolean),
+    jC: $('edit-jc').value ? parseInt($('edit-jc').value) : null,
+    jMin: $('edit-jmin').value ? parseInt($('edit-jmin').value) : null,
+    jMax: $('edit-jmax').value ? parseInt($('edit-jmax').value) : null,
+  };
+  const expires = $('edit-expires').value;
+  if (expires) body.expiresAt = new Date(expires).toISOString();
+  try {
+    await POST('/api/client/' + id, body);
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function confirmDelete(id, name) {
+  $('delete-confirm-btn').onclick = async () => {
+    try {
+      await DEL('/api/client/' + id);
+      closeModal('modal-delete');
+      showToast('Deleted', 'success');
+      navigate('/');
+    } catch(e) { showToast(e.message, 'error'); }
+  };
+  $('modal-delete').classList.add('active');
+}
+
+// ===================== ACCOUNT =====================
+async function loadMe() {
+  if (!USER) return;
+  $('me-name').value = USER.name || '';
+  $('me-email').value = USER.email || '';
+}
+
+async function saveProfile(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/me', { name: $('me-name').value, email: $('me-email').value || null });
+    showToast('Profile updated', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function changePassword(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/me/password', {
+      currentPassword: $('pw-current').value,
+      newPassword: $('pw-new').value,
+      confirmPassword: $('pw-confirm').value
+    });
+    showToast('Password changed', 'success');
+    $('pw-current').value = $('pw-new').value = $('pw-confirm').value = '';
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ===================== ADMIN =====================
+async function showAdminTab(tab, e) {
+  if (e) e.preventDefault();
+  ADMIN_TAB = tab;
+  const links = $$('.sidebar-nav a');
+  links.forEach(l => l.classList.remove('active'));
+  if (e && e.target) e.target.classList.add('active');
+
+  const el = $('admin-content');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    if (tab === 'general') {
+      const g = await GET('/api/admin/general');
+      el.innerHTML = `
+        <h3 class="mb-16">General Settings</h3>
+        <form onsubmit="saveAdminGeneral(event)">
+          <div class="form-group"><label>Session Timeout (seconds)</label><input type="number" id="adm-session-timeout" value="${g.sessionTimeout||3600}"></div>
+          <div class="form-group"><label>Enable Prometheus Metrics</label><label class="toggle"><input type="checkbox" id="adm-metrics-prom" ${g.metricsPrometheus?'checked':''}><span></span></label></div>
+          <div class="form-group"><label>Enable JSON Metrics</label><label class="toggle"><input type="checkbox" id="adm-metrics-json" ${g.metricsJson?'checked':''}><span></span></label></div>
+          <button class="btn btn-primary">Save</button>
+        </form>`;
+    } else if (tab === 'config') {
+      const uc = await GET('/api/admin/userconfig');
+      el.innerHTML = `
+        <h3 class="mb-16">Default Client Configuration</h3>
+        <form onsubmit="saveAdminConfig(event)">
+          <div class="form-group"><label>Server Hostname/IP</label><input type="text" id="adm-host" value="${esc(uc.host||'')}"></div>
+          <div class="form-group"><label>Server Port</label><input type="number" id="adm-port" value="${uc.port||51820}"></div>
+          <div class="form-group"><label>Default DNS (comma separated)</label><input type="text" id="adm-dns" value="${esc((uc.defaultDns||[]).join(', '))}"></div>
+          <div class="form-group"><label>Default Allowed IPs (comma separated)</label><input type="text" id="adm-allowedips" value="${esc((uc.defaultAllowedIps||[]).join(', '))}"></div>
+          <div class="grid-2">
+            <div class="form-group"><label>Default MTU</label><input type="number" id="adm-mtu" value="${uc.defaultMtu||1420}"></div>
+            <div class="form-group"><label>Default Keepalive</label><input type="number" id="adm-keepalive" value="${uc.defaultPersistentKeepalive||0}"></div>
+          </div>
+          <button class="btn btn-primary">Save</button>
+        </form>`;
+    } else if (tab === 'interface') {
+      const iface = await GET('/api/admin/interface');
+      el.innerHTML = `
+        <h3 class="mb-16">Interface Configuration</h3>
+        <form onsubmit="saveAdminInterface(event)">
+          <div class="grid-2">
+            <div class="form-group"><label title="Maximum Transmission Unit for the VPN interface. Default: 1420">MTU</label><input type="number" id="adm-if-mtu" value="${iface.mtu||1420}"></div>
+            <div class="form-group"><label title="UDP port for AmneziaWG connections. Default: 51820">Port</label><input type="number" id="adm-if-port" value="${iface.port||51820}"></div>
+          </div>
+          <div class="form-group"><label title="Physical network interface to route traffic through. Default: eth0">Device</label><input type="text" id="adm-if-device" value="${esc(iface.device||'eth0')}"></div>
+          <div class="grid-2">
+            <div class="form-group"><label title="IPv4 subnet for VPN clients. Server gets .1 address">IPv4 CIDR</label><input type="text" id="adm-if-ipv4" value="${esc(iface.ipv4Cidr||'')}"></div>
+            <div class="form-group"><label title="IPv6 subnet for VPN clients. Leave empty to disable IPv6">IPv6 CIDR</label><input type="text" id="adm-if-ipv6" value="${esc(iface.ipv6Cidr||'')}"></div>
+          </div>
+          <div class="form-group"><label title="Restrict each client to only access their allowed IPs via iptables rules. Requires iptables installed">Per-Client Firewall</label><label class="toggle"><input type="checkbox" id="adm-if-firewall" ${iface.firewallEnabled?'checked':''}><span></span></label></div>
+          <h3 class="mb-16 mt-16">AmneziaWG Obfuscation Parameters</h3>
+          <div class="grid-2">
+            <div class="form-group"><label title="Number of random junk packets sent before each handshake initiation (1-128). Recommended: 4-12">Jc</label><input type="number" id="adm-if-jc" value="${iface.jC||7}" min="1" max="128"></div>
+            <div class="form-group"><label title="Minimum size in bytes for junk packets (0-1279)">Jmin</label><input type="number" id="adm-if-jmin" value="${iface.jMin||10}" min="0" max="1279"></div>
+          </div>
+          <div class="form-group"><label title="Maximum size in bytes for junk packets (1-1280). Must be > Jmin and < MTU to avoid fragmentation">Jmax</label><input type="number" id="adm-if-jmax" value="${iface.jMax||1000}" min="1" max="1280"></div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Random padding bytes prepended to handshake initiation messages (0-1132). Recommended: 15-150">S1</label><input type="number" id="adm-if-s1" value="${iface.s1||128}" min="0" max="1132"></div>
+            <div class="form-group"><label title="Random padding bytes prepended to handshake response messages (0-1188). Recommended: 15-150. Must differ from S1+56">S2</label><input type="number" id="adm-if-s2" value="${iface.s2||56}" min="0" max="1188"></div>
+          </div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Random padding for cookie reply messages (0-65491). AWG v2 feature">S3</label><input type="number" id="adm-if-s3" value="${iface.s3||''}" min="0" max="65491"></div>
+            <div class="form-group"><label title="Random padding for transport/data messages (0-65519). AWG v2 feature">S4</label><input type="number" id="adm-if-s4" value="${iface.s4||''}" min="0" max="65519"></div>
+          </div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Magic header for handshake initiation packets. Can be a single value or range 'N-M'. Must not overlap with H2-H4">H1</label><input type="text" id="adm-if-h1" value="${esc(iface.h1||'')}"></div>
+            <div class="form-group"><label title="Magic header for handshake response packets. Must not overlap with H1,H3,H4">H2</label><input type="text" id="adm-if-h2" value="${esc(iface.h2||'')}"></div>
+          </div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Magic header for cookie reply packets. Must not overlap with H1,H2,H4">H3</label><input type="text" id="adm-if-h3" value="${esc(iface.h3||'')}"></div>
+            <div class="form-group"><label title="Magic header for transport/data packets. Must not overlap with H1-H3">H4</label><input type="text" id="adm-if-h4" value="${esc(iface.h4||'')}"></div>
+          </div>
+          <div class="form-group"><label title="Init junk spec (I1) — custom packet sent before handshake. Uses tag format: <b 0xHEX> <r N> <t> <rc N> <rd N>">I1 (init spec)</label><textarea id="adm-if-i1" rows="4">${esc(iface.i1||'')}</textarea></div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Second init junk spec. Same tag format as I1">I2</label><textarea id="adm-if-i2" rows="2">${esc(iface.i2||'')}</textarea></div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Third init junk spec">I3</label><textarea id="adm-if-i3" rows="2">${esc(iface.i3||'')}</textarea></div>
+            <div class="form-group"><label title="Fourth init junk spec">I4</label><textarea id="adm-if-i4" rows="2">${esc(iface.i4||'')}</textarea></div>
+          </div>
+          <div class="form-group"><label title="Fifth init junk spec">I5</label><textarea id="adm-if-i5" rows="2">${esc(iface.i5||'')}</textarea></div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Additional junk string 1. Kernel module only">J1 (kmod)</label><input type="text" id="adm-if-j1" value="${esc(iface.j1||'')}"></div>
+            <div class="form-group"><label title="Additional junk string 2. Kernel module only">J2 (kmod)</label><input type="text" id="adm-if-j2" value="${esc(iface.j2||'')}"></div>
+          </div>
+          <div class="grid-2">
+            <div class="form-group"><label title="Additional junk string 3. Kernel module only">J3 (kmod)</label><input type="text" id="adm-if-j3" value="${esc(iface.j3||'')}"></div>
+            <div class="form-group"><label title="Junk packet interval in seconds. 0 = disabled. Kernel module only">Itime (kmod)</label><input type="number" id="adm-if-itime" value="${iface.itime||0}"></div>
+          </div>
+          <div class="flex gap-8 mt-16">
+            <button class="btn btn-primary">Save</button>
+            <button type="button" class="btn btn-secondary" onclick="restartWG()">Restart Interface</button>
+          </div>
+        </form>`;
+    } else if (tab === 'hooks') {
+      const hooks = await GET('/api/admin/hooks');
+      el.innerHTML = `
+        <h3 class="mb-16">Interface Hooks</h3>
+        <form onsubmit="saveAdminHooks(event)">
+          <div class="form-group"><label title="Commands run BEFORE the AmneziaWG interface comes up. Leave empty unless using wg-quick hooks. Template vars: {{device}} {{port}} {{ipv4Cidr}} {{ipv6Cidr}}">PreUp</label><textarea id="adm-hook-preup" rows="3">${esc(hooks.preUp||'')}</textarea></div>
+          <div class="form-group"><label title="Commands run AFTER the interface comes up. Default sets up NAT masquerading and firewall rules for client traffic forwarding">PostUp</label><textarea id="adm-hook-postup" rows="3">${esc(hooks.postUp||'')}</textarea></div>
+          <div class="form-group"><label title="Commands run BEFORE the AmneziaWG interface goes down. Used to clean up PreUp rules">PreDown</label><textarea id="adm-hook-predown" rows="3">${esc(hooks.preDown||'')}</textarea></div>
+          <div class="form-group"><label title="Commands run AFTER the interface goes down. Default removes iptables NAT and forwarding rules">PostDown</label><textarea id="adm-hook-postdown" rows="3">${esc(hooks.postDown||'')}</textarea></div>
+          <button class="btn btn-primary">Save</button>
+        </form>`;
+    }
+  } catch(e) { showToast(e.message, 'error'); el.innerHTML = '<p class="text-muted">Error loading data</p>'; }
+  setTimeout(injectTooltips, 50);
+}
+
+async function saveAdminGeneral(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/admin/general', {
+      sessionTimeout: parseInt($('adm-session-timeout').value)||3600,
+      metricsPrometheus: $('adm-metrics-prom').checked,
+      metricsJson: $('adm-metrics-json').checked
+    });
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveAdminConfig(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/admin/userconfig', {
+      host: $('adm-host').value,
+      port: parseInt($('adm-port').value)||51820,
+      defaultDns: $('adm-dns').value.split(',').map(s=>s.trim()).filter(Boolean),
+      defaultAllowedIps: $('adm-allowedips').value.split(',').map(s=>s.trim()).filter(Boolean),
+      defaultMtu: parseInt($('adm-mtu').value)||1420,
+      defaultPersistentKeepalive: parseInt($('adm-keepalive').value)||0
+    });
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveAdminInterface(e) {
+  e.preventDefault();
+  // Validate AWG params
+  const jc = parseInt($('adm-if-jc').value)||0;
+  const jmin = parseInt($('adm-if-jmin').value)||0;
+  const jmax = parseInt($('adm-if-jmax').value)||0;
+  const s1 = parseInt($('adm-if-s1').value)||0;
+  const s2 = parseInt($('adm-if-s2').value)||0;
+  if (jc && (jc < 1 || jc > 128)) { showToast('Jc must be 1-128', 'error'); return; }
+  if (jmax > 0 && jmin >= jmax) { showToast('Jmax must be > Jmin', 'error'); return; }
+  if (s1 > 0 && s2 > 0 && s1 + 56 === s2) { showToast('S1 + 56 must not equal S2', 'error'); return; }
+  // Validate H1-H4 are non-overlapping (if all present and numeric)
+  const h = [$('adm-if-h1').value, $('adm-if-h2').value, $('adm-if-h3').value, $('adm-if-h4').value];
+  function parseRange(v) { const m = v.match(/^(\d+)(?:-(\d+))?$/); return m ? [parseInt(m[1]), parseInt(m[2]||m[1])] : null; }
+  const ranges = h.map(parseRange).filter(Boolean);
+  for (let i = 0; i < ranges.length; i++) {
+    for (let j = i+1; j < ranges.length; j++) {
+      if (ranges[i] && ranges[j] && !(ranges[i][1] < ranges[j][0] || ranges[j][1] < ranges[i][0])) {
+        showToast('Magic headers H'+(i+1)+' and H'+(j+1)+' overlap. They must not overlap.', 'error'); return;
+      }
+    }
+  }
+  try {
+    await POST('/api/admin/interface', {
+      mtu: parseInt($('adm-if-mtu').value)||1420,
+      port: parseInt($('adm-if-port').value)||51820,
+      device: $('adm-if-device').value,
+      ipv4Cidr: $('adm-if-ipv4').value,
+      ipv6Cidr: $('adm-if-ipv6').value,
+      firewallEnabled: $('adm-if-firewall').checked,
+      jC: parseInt($('adm-if-jc').value)||7,
+      jMin: parseInt($('adm-if-jmin').value)||10,
+      jMax: parseInt($('adm-if-jmax').value)||1000,
+      s1: parseInt($('adm-if-s1').value)||128,
+      s2: parseInt($('adm-if-s2').value)||56,
+      s3: $('adm-if-s3').value ? parseInt($('adm-if-s3').value) : null,
+      s4: $('adm-if-s4').value ? parseInt($('adm-if-s4').value) : null,
+      h1: $('adm-if-h1').value,
+      h2: $('adm-if-h2').value,
+      h3: $('adm-if-h3').value,
+      h4: $('adm-if-h4').value,
+      i1: $('adm-if-i1').value,
+      i2: $('adm-if-i2').value,
+      i3: $('adm-if-i3').value,
+      i4: $('adm-if-i4').value,
+      i5: $('adm-if-i5').value,
+      j1: $('adm-if-j1').value,
+      j2: $('adm-if-j2').value,
+      j3: $('adm-if-j3').value,
+      itime: parseInt($('adm-if-itime').value)||0
+    });
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveAdminHooks(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/admin/hooks', {
+      preUp: $('adm-hook-preup').value,
+      postUp: $('adm-hook-postup').value,
+      preDown: $('adm-hook-predown').value,
+      postDown: $('adm-hook-postdown').value
+    });
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function restartWG() {
+  try {
+    await POST('/api/admin/interface/restart');
+    showToast('Interface restarted', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ===================== SETUP =====================
+function setupGo(step) {
+  SETUP_STEP = step;
+  $('setup-step1').style.display = 'none';
+  $('setup-step2').style.display = 'none';
+  $('setup-step4').style.display = 'none';
+  if (step === 1) $('setup-step1').style.display = 'block';
+  if (step === 2) $('setup-step2').style.display = 'block';
+  if (step === 4) $('setup-step4').style.display = 'block';
+  updateSteps();
+}
+
+function updateSteps() {
+  const steps = $$('#setup-steps .step');
+  steps.forEach((s, i) => {
+    s.classList.remove('active', 'done');
+    if (i + 1 < SETUP_STEP) s.classList.add('done');
+    if (i + 1 === SETUP_STEP) s.classList.add('active');
+  });
+}
+
+async function loadSetup() {
+  // Check what step we're on from the server
+  try {
+    const info = await GET('/api/information');
+    if (!info || !info.setupNeeded) { navigate('/login'); return; }
+  } catch(e) {}
+  SETUP_STEP = 1;
+  setupGo(1);
+}
+
+async function setupCreateUser(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/setup/2', {
+      username: $('setup-user').value,
+      password: $('setup-pass').value,
+      confirmPassword: $('setup-pass2').value
+    });
+    showToast('Account created', 'success');
+    setupGo(4);
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function setupFinish(e) {
+  e.preventDefault();
+  try {
+    await POST('/api/setup/4', {
+      host: $('setup-host').value,
+      port: parseInt($('setup-port').value)||51820
+    });
+    showToast('Setup complete!', 'success');
+    setTimeout(() => navigate('/login'), 1500);
+  } catch(e) { showToast(e.message, 'error'); }
+}
+</script>
+</body>
+</html>
