@@ -126,10 +126,19 @@ function route() {
 
 function routeInternal(path) {
   if (path === '/login') {
-    $('page-login').classList.add('active');
-    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-      $('insecure-warning').style.display = 'flex';
-    }
+    // If no admin user exists yet, send them through the setup wizard first.
+    GET('/api/information').then(info => {
+      if (info && info.setupNeeded) {
+        navigate('/setup');
+        return;
+      }
+      $('page-login').classList.add('active');
+      if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        $('insecure-warning').style.display = 'flex';
+      }
+    }).catch(() => {
+      $('page-login').classList.add('active');
+    });
   } else if (path === '/setup' || path.startsWith('/setup')) {
     $('page-setup').classList.add('active');
     loadSetup();
