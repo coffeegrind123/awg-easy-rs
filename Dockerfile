@@ -7,10 +7,17 @@ RUN apk add --no-cache musl-dev pkgconfig
 
 # Copy source
 COPY Cargo.toml Cargo.lock* ./
+COPY build.rs ./build.rs
 COPY src/ ./src/
 COPY static/ ./static/
+# vendor/ holds the pinned Xray-core ELFs (amd64 + arm64, gzipped).
+# build.rs picks the matching arch and embeds it into the binary via
+# include_bytes!. The runtime extractor decompresses on first start.
+COPY vendor/ ./vendor/
 
-# Build release binary
+# Build release binary. Strip is already set in [profile.release], but
+# we run it again here so the stripped binary is what gets COPY'd into
+# the runtime stage.
 RUN cargo build --release && \
     strip target/release/awg-easy-rs
 
