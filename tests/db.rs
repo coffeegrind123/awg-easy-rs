@@ -403,17 +403,18 @@ fn next_ipv4_invalid_cidr() {
 
 #[test]
 fn next_ipv6_first_available() {
-    // ipnet::Ipv6Net::hosts() for fdcc::/112 starts at fdcc:: ; the first
-    // host (fdcc::) is the server, peers start at fdcc::1.
+    // ipnet::Ipv6Net::hosts() for fdcc::/112 enumerates fdcc:: (network) and
+    // fdcc::1 (server) before fdcc::2 (first peer). The allocator skips both
+    // the network address and the server IP, so peer #1 lands on fdcc::2.
     let ip = db::next_ipv6("fdcc::/112", &[]).unwrap();
-    assert_eq!(ip, "fdcc::1");
+    assert_eq!(ip, "fdcc::2");
 }
 
 #[test]
 fn next_ipv6_skips_used() {
-    let used: Vec<String> = vec!["fdcc::1".into(), "fdcc::2".into()];
+    let used: Vec<String> = vec!["fdcc::2".into(), "fdcc::3".into()];
     let ip = db::next_ipv6("fdcc::/112", &used).unwrap();
-    assert_eq!(ip, "fdcc::3");
+    assert_eq!(ip, "fdcc::4");
 }
 
 #[test]

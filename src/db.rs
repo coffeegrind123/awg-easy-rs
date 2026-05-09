@@ -1299,13 +1299,13 @@ pub fn delete_one_time_link(client_id: i64) -> Result<()> {
 /// Find the first host address inside *cidr* that is not in *used_ips*.
 pub fn next_ipv4(cidr: &str, used_ips: &[String]) -> Result<String> {
     let net: Ipv4Net = cidr.parse().context("Invalid IPv4 CIDR")?;
-    // Skip the first host: by convention (mirrored in wg::config_gen::server_ip)
-    // the server occupies network_addr + 1. Allocating that to a peer collides
-    // with the server's interface address and `awg syncconf` rejects with
-    // "Invalid argument".
-    for host in net.hosts().skip(1) {
+    // The server occupies network_addr + 1 (mirrored in wg::config_gen::server_ip).
+    // Allocating that to a peer collides with the server's interface address
+    // and `awg syncconf` rejects with "Invalid argument". Treat it as taken.
+    let server_ip = std::net::Ipv4Addr::from(u32::from(net.addr()) + 1).to_string();
+    for host in net.hosts() {
         let ip = host.to_string();
-        if !used_ips.contains(&ip) {
+        if ip != server_ip && !used_ips.contains(&ip) {
             return Ok(ip);
         }
     }
@@ -1315,9 +1315,14 @@ pub fn next_ipv4(cidr: &str, used_ips: &[String]) -> Result<String> {
 /// Find the first host address inside *cidr* that is not in *used_ips*.
 pub fn next_ipv6(cidr: &str, used_ips: &[String]) -> Result<String> {
     let net: Ipv6Net = cidr.parse().context("Invalid IPv6 CIDR")?;
-    for host in net.hosts().skip(1) {
+    // ipnet::Ipv6Net::hosts() includes the network address (IPv6 has no
+    // broadcast). Skip both the network address and the server IP
+    // (network + 1, mirrored in wg::config_gen::server_ip).
+    let network_addr = net.addr().to_string();
+    let server_ip = std::net::Ipv6Addr::from(u128::from(net.addr()) + 1).to_string();
+    for host in net.hosts() {
         let ip = host.to_string();
-        if !used_ips.contains(&ip) {
+        if ip != network_addr && ip != server_ip && !used_ips.contains(&ip) {
             return Ok(ip);
         }
     }
