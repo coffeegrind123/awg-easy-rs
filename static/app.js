@@ -1240,7 +1240,7 @@ async function showAdminTab(tab, e) {
       el.innerHTML = `
         <div class="notice notice--info" style="margin-bottom:14px">
           <svg><use href="#i-shield"/></svg>
-          <div>VLESS + Reality + Vision over TCP/${inbound.port}. Vision splices the inner TLS so the wire pattern matches a single TLS session — needs a clean IP and a reachable <span class="mono">dest</span>. <a href="https://docs.amnezia.org/" target="_blank" rel="noopener">More on Reality</a></div>
+          <div>Xray VLESS + Reality + Vision over TCP/${inbound.port}. Vision splices the inner TLS so the wire pattern matches a single TLS session — needs a clean IP and a reachable <span class="mono">dest</span>. Reality and Vision are <a href="https://github.com/XTLS/Xray-core" target="_blank" rel="noopener">Xray-core</a>-specific extensions; not portable to plain V2Ray.</div>
         </div>
         <div style="margin-bottom:14px">
           Bundled Xray ${esc(inbound.xrayVersion || '?')} · supervisor: ${stateLabel}

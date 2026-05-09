@@ -203,7 +203,7 @@ pub struct General {
     pub updated_at: String,
 }
 
-/// Singleton "Browsing mode" inbound — one VLESS+Reality+Vision listener
+/// Singleton "Browsing mode" inbound — one Xray VLESS+Reality+Vision listener
 /// per server. Modelled as a single row keyed on `id = 'xray0'` to match
 /// the singleton pattern already used by `interfaces_table`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
