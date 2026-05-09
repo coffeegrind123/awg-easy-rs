@@ -1299,7 +1299,11 @@ pub fn delete_one_time_link(client_id: i64) -> Result<()> {
 /// Find the first host address inside *cidr* that is not in *used_ips*.
 pub fn next_ipv4(cidr: &str, used_ips: &[String]) -> Result<String> {
     let net: Ipv4Net = cidr.parse().context("Invalid IPv4 CIDR")?;
-    for host in net.hosts() {
+    // Skip the first host: by convention (mirrored in wg::config_gen::server_ip)
+    // the server occupies network_addr + 1. Allocating that to a peer collides
+    // with the server's interface address and `awg syncconf` rejects with
+    // "Invalid argument".
+    for host in net.hosts().skip(1) {
         let ip = host.to_string();
         if !used_ips.contains(&ip) {
             return Ok(ip);
@@ -1311,7 +1315,7 @@ pub fn next_ipv4(cidr: &str, used_ips: &[String]) -> Result<String> {
 /// Find the first host address inside *cidr* that is not in *used_ips*.
 pub fn next_ipv6(cidr: &str, used_ips: &[String]) -> Result<String> {
     let net: Ipv6Net = cidr.parse().context("Invalid IPv6 CIDR")?;
-    for host in net.hosts() {
+    for host in net.hosts().skip(1) {
         let ip = host.to_string();
         if !used_ips.contains(&ip) {
             return Ok(ip);

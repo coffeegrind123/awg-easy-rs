@@ -115,6 +115,16 @@ where
 fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
     let peer = peers.iter().find(|p| p.public_key == client.public_key);
 
+    // dns / allowedIps / serverAllowedIps / firewallIps are stored as JSON-
+    // encoded arrays in TEXT columns. Deserialize them on the way out so the
+    // UI receives real arrays — calling .join() on a string was the previous
+    // failure mode.
+    let parse_arr = |s: &Option<String>| -> Value {
+        s.as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .unwrap_or_else(|| json!([]))
+    };
+
     json!({
         "id": client.id,
         "userId": client.user_id,
@@ -130,9 +140,9 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         "preDown": client.pre_down,
         "postDown": client.post_down,
         "expiresAt": client.expires_at,
-        "allowedIps": client.allowed_ips,
-        "serverAllowedIps": client.server_allowed_ips,
-        "firewallIps": client.firewall_ips,
+        "allowedIps": parse_arr(&client.allowed_ips),
+        "serverAllowedIps": parse_arr(&client.server_allowed_ips),
+        "firewallIps": parse_arr(&client.firewall_ips),
         "persistentKeepalive": client.persistent_keepalive,
         "mtu": client.mtu,
         "jC": client.j_c,
@@ -143,7 +153,7 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         "i3": client.i3,
         "i4": client.i4,
         "i5": client.i5,
-        "dns": client.dns,
+        "dns": parse_arr(&client.dns),
         "serverEndpoint": client.server_endpoint,
         "advancedSecurity": client.advanced_security,
         "enabled": client.enabled,

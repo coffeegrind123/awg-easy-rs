@@ -372,15 +372,15 @@ fn client_ipv4_unique_constraint() {
 
 #[test]
 fn next_ipv4_first_available() {
-    // 10.8.0.0/24 — network address, 10.8.0.255 — broadcast
-    // hosts(): 10.8.0.1 through 10.8.0.254
+    // 10.8.0.0/24 — server occupies .1 by convention, peers start at .2.
     let ip = db::next_ipv4("10.8.0.0/24", &[]).unwrap();
-    assert_eq!(ip, "10.8.0.1");
+    assert_eq!(ip, "10.8.0.2");
 }
 
 #[test]
 fn next_ipv4_skips_used() {
-    let used: Vec<String> = (1..=5)
+    // Used addresses include the server (.1) and peers .2-.5; next is .6.
+    let used: Vec<String> = (2..=5)
         .map(|i| format!("10.8.0.{i}"))
         .collect();
     let ip = db::next_ipv4("10.8.0.0/24", &used).unwrap();
@@ -389,7 +389,7 @@ fn next_ipv4_skips_used() {
 
 #[test]
 fn next_ipv4_exhausted_pool() {
-    let used: Vec<String> = (1..=254)
+    let used: Vec<String> = (2..=254)
         .map(|i| format!("10.8.0.{i}"))
         .collect();
     let result = db::next_ipv4("10.8.0.0/24", &used);
@@ -403,15 +403,15 @@ fn next_ipv4_invalid_cidr() {
 
 #[test]
 fn next_ipv6_first_available() {
-    // ipnet::Ipv6Net::hosts() includes the network address for IPv6
-    // (no broadcast). First address returned for fdcc::/112 is fdcc::.
+    // ipnet::Ipv6Net::hosts() for fdcc::/112 starts at fdcc:: ; the first
+    // host (fdcc::) is the server, peers start at fdcc::1.
     let ip = db::next_ipv6("fdcc::/112", &[]).unwrap();
-    assert_eq!(ip, "fdcc::");
+    assert_eq!(ip, "fdcc::1");
 }
 
 #[test]
 fn next_ipv6_skips_used() {
-    let used: Vec<String> = vec!["fdcc::".into(), "fdcc::1".into(), "fdcc::2".into()];
+    let used: Vec<String> = vec!["fdcc::1".into(), "fdcc::2".into()];
     let ip = db::next_ipv6("fdcc::/112", &used).unwrap();
     assert_eq!(ip, "fdcc::3");
 }
