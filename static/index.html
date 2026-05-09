@@ -539,7 +539,10 @@ label { color: var(--fg-soft); }
 }
 .danger-zone-text { flex: 1; }
 .danger-zone b { font-size: 13px; color: var(--danger); font-weight: 600; }
-.danger-zone span { font-size: 12px; color: var(--fg-mute); display: block; margin-top: 2px; }
+/* `>` so only the direct-child description span becomes a block; otherwise
+   nested <span class="mono"> tags inside the description (peer name, "awg0")
+   also get display:block and the sentence renders one word per line. */
+.danger-zone-text > span { font-size: 12px; color: var(--fg-mute); display: block; margin-top: 2px; }
 
 /* ============== PAGE HEAD ============== */
 .page-head {
