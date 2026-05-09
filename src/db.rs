@@ -1292,6 +1292,24 @@ pub fn delete_one_time_link(client_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Active (non-expired) one-time link for *client_id*, if any.
+/// The schema enforces at most one row per client (id is both primary key
+/// and the foreign-key reference into clients_table), so this is a unique
+/// lookup. Returns None when no link exists or the link has expired.
+pub fn get_active_one_time_link(client_id: i64) -> Result<Option<OneTimeLink>> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let c = conn();
+    let row = c
+        .query_row(
+            "SELECT * FROM one_time_links_table \
+             WHERE id = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+            params![client_id, now],
+            |row| OneTimeLink::from_row(row),
+        )
+        .ok();
+    Ok(row)
+}
+
 // ---------------------------------------------------------------------------
 // IP allocation
 // ---------------------------------------------------------------------------

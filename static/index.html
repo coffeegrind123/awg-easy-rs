@@ -1090,6 +1090,7 @@ label { color: var(--fg-soft); }
     <p class="sub" style="margin-bottom:12px">Open AmneziaWG on your device and scan this code.</p>
     <div id="qr-image" style="text-align:center;padding:8px;background:#fff;border-radius:var(--r-sm)"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+      <button class="btn btn--ghost" onclick="closeModal('modal-qr')">Close</button>
       <button class="btn btn--ghost" onclick="copyQR()"><svg><use href="#i-copy"/></svg> Copy PNG</button>
       <button class="btn btn--primary" onclick="downloadQR()"><svg><use href="#i-download"/></svg> Download SVG</button>
     </div>

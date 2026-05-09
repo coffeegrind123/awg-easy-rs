@@ -125,6 +125,20 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
             .unwrap_or_else(|| json!([]))
     };
 
+    // Active one-time link, if any. Shape mirrors upstream awg-easy
+    // (oneTimeLink.oneTimeLink + oneTimeLink.expiresAt) so the frontend
+    // can render the inline OTL bar with its countdown.
+    let one_time_link = db::get_active_one_time_link(client.id)
+        .ok()
+        .flatten()
+        .map(|l| {
+            json!({
+                "oneTimeLink": l.one_time_link,
+                "expiresAt": l.expires_at,
+                "createdAt": l.created_at,
+            })
+        });
+
     json!({
         "id": client.id,
         "userId": client.user_id,
@@ -164,6 +178,7 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         "transferTx": peer.map(|p| p.transfer_tx).unwrap_or(0),
         "latestHandshakeAt": peer.and_then(|p| p.latest_handshake.map(|d| d.to_rfc3339())),
         "endpoint": peer.and_then(|p| p.endpoint.clone()),
+        "oneTimeLink": one_time_link,
     })
 }
 

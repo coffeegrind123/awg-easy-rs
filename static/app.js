@@ -496,6 +496,19 @@ async function toggleClient(id, enabled) {
 function showCreateModal() { $('modal-create').classList.add('active'); $('create-name').focus(); }
 function closeModal(id) { $(id).classList.remove('active'); }
 
+// Click on the dimmed backdrop (but not inside .modal) closes the modal.
+document.addEventListener('click', (e) => {
+  if (e.target.classList && e.target.classList.contains('modal-overlay') && e.target.classList.contains('active')) {
+    e.target.classList.remove('active');
+  }
+});
+// Escape closes whichever modal is open.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay.active').forEach(el => el.classList.remove('active'));
+  }
+});
+
 async function createClient(e) {
   e.preventDefault();
   const body = { name: $('create-name').value };
