@@ -20,6 +20,13 @@ pub struct Config {
     pub db_path: String,
     pub wg_conf_dir: String,
     pub wg_binary: String,
+    /// Directory where the bundled Xray ELF, generated `server.json`, and
+    /// other Xray runtime files live. Defaults to `<wg_conf_dir>/xray`.
+    pub xray_dir: String,
+    /// Operator escape hatch: when set, the Xray supervisor uses this path
+    /// instead of extracting the bundled binary. Lets advanced operators
+    /// track upstream Xray independently of awg-easy-rs releases.
+    pub xray_binary_override: Option<String>,
 }
 
 pub fn get_env(key: &str, default: &str) -> String {
@@ -70,6 +77,9 @@ impl Config {
 
         let db_path = get_env("WG_EASY_DB_PATH", "/etc/wireguard/wg-easy.db");
         let wg_conf_dir = get_env("WG_EASY_CONF_DIR", "/etc/wireguard");
+        let xray_dir =
+            env::var("WG_EASY_XRAY_DIR").unwrap_or_else(|_| format!("{}/xray", wg_conf_dir));
+        let xray_binary_override = env::var("XRAY_BIN_PATH").ok().filter(|s| !s.is_empty());
 
         Config {
             port,
@@ -88,6 +98,8 @@ impl Config {
             db_path,
             wg_conf_dir,
             wg_binary: "awg".to_string(),
+            xray_dir,
+            xray_binary_override,
         }
     }
 }

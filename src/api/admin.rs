@@ -142,7 +142,7 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
 // Enforce admin role (role >= 1)
 // ---------------------------------------------------------------------------
 
-fn require_admin(
+pub(crate) fn require_admin(
     jar: &CookieJar,
     state: &AppState,
 ) -> Result<db::User, (StatusCode, Json<Value>)> {
@@ -344,6 +344,7 @@ pub async fn get_userconfig(
         "defaultI3": uc.default_i3,
         "defaultI4": uc.default_i4,
         "defaultI5": uc.default_i5,
+        "defaultAdditionalConfig": uc.default_additional_config,
         "host": uc.host,
         "port": uc.port,
     })))
@@ -375,6 +376,7 @@ pub async fn update_userconfig(
             (&["defaultI3"], "default_i3"),
             (&["defaultI4"], "default_i4"),
             (&["defaultI5"], "default_i5"),
+            (&["defaultAdditionalConfig"], "default_additional_config"),
             (&["host"], "host"),
             (&["port"], "port"),
         ];
@@ -446,6 +448,7 @@ pub async fn get_interface(
         "i3": iface.i3,
         "i4": iface.i4,
         "i5": iface.i5,
+        "additionalConfig": iface.additional_config,
         "firewallEnabled": iface.firewall_enabled,
         "enabled": iface.enabled,
     })))
@@ -490,6 +493,7 @@ pub async fn update_interface(
             ("i3", "i3"),
             ("i4", "i4"),
             ("i5", "i5"),
+            ("additionalConfig", "additional_config"),
             // j1/j2/j3/itime are intentionally NOT accepted — see comment on
             // get_interface() above. Even if a client POSTs them, we drop
             // the values silently to avoid future-broken configs.

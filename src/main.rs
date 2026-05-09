@@ -38,6 +38,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("AmneziaWG started");
     }
 
+    // Bring Browsing-mode Xray online if it's been enabled. Non-fatal:
+    // operators who haven't set up Reality keys yet will see Status::Disabled
+    // in the admin UI rather than a startup crash.
+    #[cfg(xray_bundled)]
+    if let Err(e) = awg_easy_rs::xray::supervisor::ensure_running().await {
+        tracing::warn!("Xray supervisor startup failed (non-fatal): {e}");
+    }
+
     // Start background cron job (every 60 seconds)
     tokio::spawn(async move {
         loop {

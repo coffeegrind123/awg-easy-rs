@@ -12,6 +12,7 @@ pub mod clients;
 pub mod routes;
 pub mod session;
 pub mod setup;
+pub mod xray;
 
 use axum::extract::FromRef;
 use axum::Router;
@@ -174,6 +175,54 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/admin/interface/restart",
             axum::routing::post(admin::restart_interface),
+        )
+        // Xray (Browsing mode) — admin
+        .route(
+            "/admin/xray/inbound",
+            axum::routing::get(xray::get_inbound).post(xray::update_inbound),
+        )
+        .route(
+            "/admin/xray/inbound/regenerate-keys",
+            axum::routing::post(xray::regenerate_keys),
+        )
+        .route(
+            "/admin/xray/inbound/probe-dest",
+            axum::routing::post(xray::probe_dest),
+        )
+        .route(
+            "/admin/xray/inbound/dest-candidates",
+            axum::routing::get(xray::dest_candidates),
+        )
+        .route(
+            "/admin/xray/status",
+            axum::routing::get(xray::supervisor_status),
+        )
+        .route(
+            "/admin/xray/restart",
+            axum::routing::post(xray::restart),
+        )
+        // Xray clients
+        .route(
+            "/xray/clients",
+            axum::routing::get(xray::list_clients).post(xray::create_client),
+        )
+        .route(
+            "/xray/clients/:id",
+            axum::routing::get(xray::get_client)
+                .post(xray::update_client)
+                .delete(xray::delete_client),
+        )
+        .route(
+            "/xray/clients/:id/share",
+            axum::routing::get(xray::client_share_url),
+        )
+        .route(
+            "/xray/clients/:id/qrcode.svg",
+            axum::routing::get(xray::client_qrcode),
+        )
+        .route(
+            "/xray/clients/:id/json",
+            axum::routing::get(xray::client_amnezia_json),
         )
         // Me (current user)
         .route("/me", axum::routing::post(session::update_me))

@@ -10,3 +10,4 @@ pub mod db;
 pub mod firewall;
 pub mod qr;
 pub mod wg;
+pub mod xray;

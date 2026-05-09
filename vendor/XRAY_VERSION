@@ -1,0 +1,13 @@
+# Pinned Xray-core version embedded in the awg-easy-rs binary.
+# build.rs reads this file to validate that the vendored blobs match the
+# expected version, and prints the version into the binary at compile time.
+
+XRAY_VERSION=v26.3.27
+
+# SHA-256 of the *uncompressed* xray ELF binaries — the runtime extractor
+# uses these to skip re-extraction when the on-disk file already matches.
+# (Distinct from the SHA of the .zip releases, which is what XTLS publishes
+# in their .dgst files — those are recorded in vendor/README.md.)
+
+XRAY_AMD64_SHA256=8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed
+XRAY_ARM64_SHA256=c2d20a7045250497083afea0d79db0672f6c89a25aaaf37c92de034d6b764b04

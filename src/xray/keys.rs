@@ -1,0 +1,226 @@
+//! Key/UUID generation for Xray Reality.
+//!
+//! We delegate to the bundled Xray binary for the curve25519 keypair so
+//! the wire format is exactly what upstream produces — Reality's key
+//! handling is a moving target and there's no value in maintaining a
+//! parallel Rust implementation. UUIDs and short-IDs are generated locally
+//! since `OsRng` is the same source `xray uuid` would use anyway.
+
+use std::process::Stdio;
+
+use anyhow::{anyhow, Context, Result};
+use rand::Rng;
+use tokio::process::Command;
+
+#[cfg(xray_bundled)]
+use crate::xray::runtime;
+
+/// Reality x25519 keypair, base64-encoded as Xray expects.
+#[derive(Debug, Clone)]
+pub struct RealityKeypair {
+    pub private_key: String,
+    pub public_key: String,
+}
+
+/// Spawn `xray x25519` and parse the two key lines. Output formats we've
+/// seen across Xray-core releases:
+///
+/// ```text
+/// // v26.x
+/// PrivateKey: gK0…
+/// Password (PublicKey): Yt8…
+/// Hash32: a1b…
+///
+/// // v25.x and some forks
+/// Private key: gK0…
+/// Public key:  Yt8…
+/// ```
+///
+/// Reality requires a 32-byte curve25519 key in URL-safe base64 (no
+/// padding). We accept both spellings so a future Xray bump doesn't
+/// break this parser silently.
+#[cfg(xray_bundled)]
+pub async fn generate_x25519() -> Result<RealityKeypair> {
+    let bin = runtime::resolve_binary()?;
+    let output = Command::new(&bin)
+        .arg("x25519")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("spawn {} x25519", bin.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "xray x25519 exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .context("xray x25519 emitted non-UTF8 output")?;
+    parse_x25519_output(&stdout)
+}
+
+/// Pure-string parser split out so it can be unit-tested without a
+/// running Xray binary.
+fn parse_x25519_output(stdout: &str) -> Result<RealityKeypair> {
+    let mut private_key: Option<String> = None;
+    let mut public_key: Option<String> = None;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        // Order matters: try the v26 `Password (PublicKey):` label before
+        // the bare `PublicKey:` so we don't accidentally match the wrong
+        // line on newer releases. The v25 forms are kept as fallback.
+        if let Some(v) = strip_label(trimmed, &["PrivateKey:", "Private key:"]) {
+            private_key.get_or_insert_with(|| v.to_string());
+        } else if let Some(v) = strip_label(
+            trimmed,
+            &[
+                "Password (PublicKey):",
+                "PublicKey:",
+                "Public key:",
+            ],
+        ) {
+            public_key.get_or_insert_with(|| v.to_string());
+        }
+    }
+
+    Ok(RealityKeypair {
+        private_key: private_key
+            .ok_or_else(|| anyhow!("`xray x25519` output missing PrivateKey line"))?,
+        public_key: public_key
+            .ok_or_else(|| anyhow!("`xray x25519` output missing PublicKey line"))?,
+    })
+}
+
+fn strip_label<'a>(line: &'a str, labels: &[&str]) -> Option<&'a str> {
+    for label in labels {
+        if let Some(rest) = line.strip_prefix(label) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// UUIDv4 string suitable for `realitySettings.clients[].id`. We use the
+/// `uuid` crate (already a dependency for one-time-link IDs) rather than
+/// shelling out — the wire format is identical.
+pub fn generate_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Reality short-id: 1..=16 hex characters. We default to 8 bytes (16
+/// hex chars), which all reference impls (3X-UI, 0xevn, wulabing) produce
+/// and which gives enough entropy that two random clients won't collide.
+pub fn generate_short_id() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rngs::OsRng.fill(&mut bytes[..]);
+    hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_x25519_v26_format() {
+        // Verbatim from `xray v26.3.27 x25519` — captured during smoke
+        // testing of the bundled binary. Notable: the public key line is
+        // `Password (PublicKey): …`, not `PublicKey: …`.
+        let stdout = "\
+PrivateKey: WNBaVNH48CG9SumFGQPEVCs1oSoZWS_hbclKHISa3ng
+Password (PublicKey): 7qWmW4TmzGw3YcFUZg6xiI4TDbeS5TTVZO8S1-1SUgg
+Hash32: kKpGT8TO6gx4yAy_viz6-kU-uCIjGN3TzJJArIx_EEA
+";
+        let kp = parse_x25519_output(stdout).unwrap();
+        assert_eq!(kp.private_key, "WNBaVNH48CG9SumFGQPEVCs1oSoZWS_hbclKHISa3ng");
+        assert_eq!(kp.public_key, "7qWmW4TmzGw3YcFUZg6xiI4TDbeS5TTVZO8S1-1SUgg");
+    }
+
+    #[test]
+    fn parse_x25519_legacy_format() {
+        // v25.x prints with a space.
+        let stdout = "Private key: priv_v25\nPublic key: pub_v25\n";
+        let kp = parse_x25519_output(stdout).unwrap();
+        assert_eq!(kp.private_key, "priv_v25");
+        assert_eq!(kp.public_key, "pub_v25");
+    }
+
+    #[test]
+    fn parse_x25519_intermediate_format() {
+        // A hypothetical release that drops the Password() prefix — we
+        // should still match the bare PublicKey: form.
+        let stdout = "PrivateKey: priv_mid\nPublicKey: pub_mid\nHash32: x\n";
+        let kp = parse_x25519_output(stdout).unwrap();
+        assert_eq!(kp.private_key, "priv_mid");
+        assert_eq!(kp.public_key, "pub_mid");
+    }
+
+    #[test]
+    fn parse_x25519_missing_lines_errors() {
+        let stdout = "Hash32: f00\n";
+        assert!(parse_x25519_output(stdout).is_err());
+    }
+
+    #[test]
+    fn generate_uuid_is_v4_format() {
+        let uuid = generate_uuid();
+        // 8-4-4-4-12 = 36 chars including hyphens.
+        assert_eq!(uuid.len(), 36);
+        assert!(uuid.chars().nth(8) == Some('-'));
+        assert!(uuid.chars().nth(13) == Some('-'));
+    }
+
+    #[test]
+    fn generate_short_id_is_16_hex() {
+        let s = generate_short_id();
+        assert_eq!(s.len(), 16);
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_short_id_is_unique() {
+        // Trivial collision check — we're relying on OsRng so the chance
+        // of two 8-byte values colliding in 100 draws is ~1e-15.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            assert!(seen.insert(generate_short_id()));
+        }
+    }
+
+    /// End-to-end check: actually run the bundled Xray binary's `x25519`
+    /// subcommand and confirm we parse the keypair. This is the test
+    /// that would have caught the v26 `Password (PublicKey):` label
+    /// rename — pure fixture-based parser tests can drift from reality
+    /// when a future Xray bump changes the label set.
+    #[cfg(xray_bundled)]
+    #[tokio::test]
+    async fn end_to_end_x25519_against_bundled_binary() {
+        // Use a unique XRAY_DIR so we don't fight other tests.
+        let dir = format!(
+            "/tmp/awg-easy-rs-keys-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0),
+        );
+        std::env::set_var("WG_EASY_XRAY_DIR", &dir);
+        // CONFIG is a LazyLock so the env var must be set before the
+        // first runtime::resolve_binary() call. In this test process
+        // that's our first call.
+        let kp = generate_x25519().await.expect("xray x25519 should produce a parseable keypair");
+        // Reality keys are 32 bytes encoded as URL-safe base64 → 43 chars
+        // (or 44 with optional `=` padding). We don't enforce strict
+        // length to avoid being tripped by future encoding changes.
+        assert!(!kp.private_key.is_empty(), "private key parsed");
+        assert!(!kp.public_key.is_empty(), "public key parsed");
+        assert_ne!(kp.private_key, kp.public_key);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

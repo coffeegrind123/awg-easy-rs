@@ -547,3 +547,138 @@ fn update_hooks() {
     db::update_hooks(&fields).unwrap();
     assert_eq!(db::get_hooks().unwrap().pre_up, "echo hello");
 }
+
+// ---------------------------------------------------------------------------
+// Xray inbound + clients
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial(db)]
+fn get_xray_inbound_seeded() {
+    seed();
+    let inbound = db::get_xray_inbound().unwrap();
+    assert_eq!(inbound.id, "xray0");
+    assert_eq!(inbound.port, 443);
+    // Default dest must be reachable from most jurisdictions; if we ever
+    // change it, update this assertion.
+    assert_eq!(inbound.dest, "www.microsoft.com:443");
+    assert!(inbound.server_names.contains("www.microsoft.com"));
+    assert_eq!(inbound.fingerprint_default, "chrome");
+    // Disabled until operator generates keys.
+    assert!(!inbound.enabled);
+    assert!(inbound.private_key.is_empty());
+    assert!(inbound.public_key.is_empty());
+}
+
+#[test]
+#[serial(db)]
+fn update_xray_keypair_round_trip() {
+    seed();
+    db::update_xray_keypair("PRIV_KEY_BASE64", "PUB_KEY_BASE64").unwrap();
+    let inbound = db::get_xray_inbound().unwrap();
+    assert_eq!(inbound.private_key, "PRIV_KEY_BASE64");
+    assert_eq!(inbound.public_key, "PUB_KEY_BASE64");
+}
+
+#[test]
+#[serial(db)]
+fn update_xray_inbound_invalid_column() {
+    seed();
+    let mut fields = db::UpdateMap::new();
+    // Column not in VALID_XRAY_INBOUND_COLUMNS — must be rejected.
+    fields.insert("password".into(), "hunter2".into());
+    let res = db::update_xray_inbound(&fields);
+    assert!(res.is_err(), "whitelist must reject unknown columns");
+}
+
+#[test]
+#[serial(db)]
+fn create_and_list_xray_clients() {
+    seed();
+    let id = db::create_xray_client(&db::CreateXrayClientParams {
+        user_id: None,
+        inbound_id: "xray0".into(),
+        name: "alice".into(),
+        uuid: "11111111-2222-3333-4444-555555555555".into(),
+        short_id: "0123456789abcdef".into(),
+        expires_at: None,
+        additional_config: None,
+        enabled: true,
+    }).unwrap();
+    assert!(id > 0);
+
+    let clients = db::list_xray_clients().unwrap();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].name, "alice");
+    assert_eq!(clients[0].uuid, "11111111-2222-3333-4444-555555555555");
+    assert_eq!(clients[0].short_id, "0123456789abcdef");
+    assert!(clients[0].enabled);
+}
+
+#[test]
+#[serial(db)]
+fn xray_client_uuid_unique() {
+    seed();
+    let p = db::CreateXrayClientParams {
+        user_id: None,
+        inbound_id: "xray0".into(),
+        name: "alice".into(),
+        uuid: "deadbeef-dead-beef-dead-beefdeadbeef".into(),
+        short_id: "aaaaaaaaaaaaaaaa".into(),
+        expires_at: None,
+        additional_config: None,
+        enabled: true,
+    };
+    db::create_xray_client(&p).unwrap();
+    // Second insert with same UUID must fail the UNIQUE constraint.
+    let res = db::create_xray_client(&p);
+    assert!(res.is_err(), "UUID UNIQUE must be enforced");
+}
+
+#[test]
+#[serial(db)]
+fn xray_client_short_id_unique() {
+    seed();
+    db::create_xray_client(&db::CreateXrayClientParams {
+        user_id: None,
+        inbound_id: "xray0".into(),
+        name: "alice".into(),
+        uuid: "11111111-1111-1111-1111-111111111111".into(),
+        short_id: "shared_short_id".into(),
+        expires_at: None,
+        additional_config: None,
+        enabled: true,
+    }).unwrap();
+    // Different UUID, same shortId — must fail UNIQUE on short_id.
+    let res = db::create_xray_client(&db::CreateXrayClientParams {
+        user_id: None,
+        inbound_id: "xray0".into(),
+        name: "bob".into(),
+        uuid: "22222222-2222-2222-2222-222222222222".into(),
+        short_id: "shared_short_id".into(),
+        expires_at: None,
+        additional_config: None,
+        enabled: true,
+    });
+    assert!(res.is_err(), "short_id UNIQUE must be enforced");
+}
+
+#[test]
+#[serial(db)]
+fn toggle_and_delete_xray_client() {
+    seed();
+    let id = db::create_xray_client(&db::CreateXrayClientParams {
+        user_id: None,
+        inbound_id: "xray0".into(),
+        name: "carol".into(),
+        uuid: "33333333-3333-3333-3333-333333333333".into(),
+        short_id: "bbbbbbbbbbbbbbbb".into(),
+        expires_at: None,
+        additional_config: None,
+        enabled: true,
+    }).unwrap();
+    db::toggle_xray_client(id, false).unwrap();
+    assert!(!db::get_xray_client(id).unwrap().enabled);
+    db::delete_xray_client(id).unwrap();
+    assert!(db::get_xray_client(id).is_err());
+}

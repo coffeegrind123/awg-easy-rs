@@ -88,6 +88,10 @@ pub struct Interface {
     pub j3: String,
     pub itime: i64,
     pub firewall_enabled: bool,
+    /// Free-form text appended verbatim to the server `[Interface]` block.
+    /// Mirrors amnezia-client's `additionalServerConfig` — escape hatch for
+    /// keys awg-quick understands but the UI doesn't model. Empty by default.
+    pub additional_config: String,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -130,6 +134,9 @@ pub struct Client {
     /// - `None` → omit the key entirely; the kernel auto-detects on first
     ///   handshake by validating the H1 magic header.
     pub advanced_security: Option<bool>,
+    /// Free-form text appended to this peer's generated client `[Interface]`
+    /// block. When `None`, falls back to `UserConfig::default_additional_config`.
+    pub additional_config: Option<String>,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -165,6 +172,9 @@ pub struct UserConfig {
     pub default_i3: String,
     pub default_i4: String,
     pub default_i5: String,
+    /// Default free-form `[Interface]` append used for new clients that don't
+    /// override it on their own row. Empty string == no append.
+    pub default_additional_config: String,
     pub host: String,
     pub port: i64,
 }
@@ -189,6 +199,61 @@ pub struct General {
     pub metrics_prometheus: bool,
     pub metrics_json: bool,
     pub metrics_password: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Singleton "Browsing mode" inbound — one VLESS+Reality+Vision listener
+/// per server. Modelled as a single row keyed on `id = 'xray0'` to match
+/// the singleton pattern already used by `interfaces_table`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayInbound {
+    pub id: String,
+    pub port: i64,
+    /// Reality `dest` — the upstream `host:port` Xray fronts when DPI
+    /// inspects the connection. Must be reachable from the server and
+    /// must terminate TLS 1.3 with a SAN matching `server_names[0]`.
+    pub dest: String,
+    /// JSON array of SNI strings (Reality `serverNames`). The first
+    /// entry is what clients put in `?sni=…`.
+    pub server_names: String,
+    /// Reality x25519 private key (server-side). Empty until first
+    /// `regenerate_keys` call.
+    pub private_key: String,
+    /// Matching x25519 public key (handed to clients in `?pbk=…`).
+    pub public_key: String,
+    /// Default uTLS fingerprint baked into share links (`chrome`,
+    /// `firefox`, `safari`, `randomized`, `random`).
+    pub fingerprint_default: String,
+    /// Free-form text appended verbatim into the generated `server.json`'s
+    /// inbound — escape hatch for sniffing/routing tweaks the UI doesn't
+    /// model. Empty by default.
+    pub additional_config: String,
+    /// When false the supervisor will not start Xray. Safe default —
+    /// requires the operator to set `dest`, generate keys, and explicitly
+    /// flip the toggle.
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One Xray (VLESS) peer. The `inbound_id` FK supports multi-inbound
+/// later; v1 always points at `'xray0'`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayClient {
+    pub id: i64,
+    pub user_id: Option<i64>,
+    pub inbound_id: String,
+    pub name: String,
+    /// Per-client UUID — goes into `realitySettings.clients[].id` and the
+    /// `vless://uuid@…` share URL.
+    pub uuid: String,
+    /// Per-client Reality short-id (8 hex bytes by default). Pushed into
+    /// `realitySettings.shortIds[]` and the `?sid=…` share param.
+    pub short_id: String,
+    pub expires_at: Option<String>,
+    pub additional_config: Option<String>,
+    pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -309,6 +374,8 @@ impl Interface {
             j3: row.get("j3").unwrap_or_default(),
             itime: row.get("itime").unwrap_or(0),
             firewall_enabled: int_to_bool(row.get::<_, i64>("firewall_enabled")?),
+            // Older DBs may not have this column yet; tolerate it.
+            additional_config: row.get("additional_config").unwrap_or_default(),
             enabled: int_to_bool(row.get::<_, i64>("enabled")?),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -357,6 +424,8 @@ impl Client {
                 .ok()
                 .flatten()
                 .map(int_to_bool),
+            // Older DBs may not have this column yet; tolerate it.
+            additional_config: row.get::<_, Option<String>>("additional_config").ok().flatten(),
             enabled: int_to_bool(row.get::<_, i64>("enabled")?),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -398,6 +467,10 @@ impl UserConfig {
             default_i3: row.get("default_i3")?,
             default_i4: row.get("default_i4")?,
             default_i5: row.get("default_i5")?,
+            // Older DBs may not have this column yet; tolerate it.
+            default_additional_config: row
+                .get("default_additional_config")
+                .unwrap_or_default(),
             host: row.get("host")?,
             port: row.get("port")?,
         })
@@ -446,6 +519,42 @@ impl OneTimeLink {
     }
 }
 
+impl XrayInbound {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(XrayInbound {
+            id: row.get("id")?,
+            port: row.get("port")?,
+            dest: row.get("dest")?,
+            server_names: row.get("server_names")?,
+            private_key: row.get("private_key")?,
+            public_key: row.get("public_key")?,
+            fingerprint_default: row.get("fingerprint_default")?,
+            additional_config: row.get("additional_config")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl XrayClient {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(XrayClient {
+            id: row.get("id")?,
+            user_id: row.get("user_id")?,
+            inbound_id: row.get("inbound_id")?,
+            name: row.get("name")?,
+            uuid: row.get("uuid")?,
+            short_id: row.get("short_id")?,
+            expires_at: row.get("expires_at")?,
+            additional_config: row.get("additional_config")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQL DDL – all seven tables with the final schema
 // ---------------------------------------------------------------------------
@@ -481,6 +590,7 @@ CREATE TABLE IF NOT EXISTS interfaces_table (
     j3                TEXT NOT NULL DEFAULT '',
     itime             INTEGER NOT NULL DEFAULT 0,
     firewall_enabled  INTEGER NOT NULL DEFAULT 0,
+    additional_config TEXT NOT NULL DEFAULT '',
     enabled           INTEGER NOT NULL DEFAULT 1,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
@@ -518,6 +628,7 @@ CREATE TABLE IF NOT EXISTS clients_table (
     dns                 TEXT,
     server_endpoint     TEXT,
     advanced_security   INTEGER,
+    additional_config   TEXT,
     enabled             INTEGER NOT NULL DEFAULT 1,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -555,6 +666,7 @@ CREATE TABLE IF NOT EXISTS user_configs_table (
     default_i3                      TEXT NOT NULL DEFAULT '',
     default_i4                      TEXT NOT NULL DEFAULT '',
     default_i5                      TEXT NOT NULL DEFAULT '',
+    default_additional_config       TEXT NOT NULL DEFAULT '',
     host                            TEXT NOT NULL DEFAULT '',
     port                            INTEGER NOT NULL DEFAULT 51820,
     created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -597,6 +709,38 @@ CREATE TABLE IF NOT EXISTS one_time_links_table (
     FOREIGN KEY (id) REFERENCES clients_table(id) ON DELETE CASCADE
 )"#;
 
+const CREATE_XRAY_INBOUND: &str = r#"
+CREATE TABLE IF NOT EXISTS xray_inbound_table (
+    id                   TEXT PRIMARY KEY,
+    port                 INTEGER NOT NULL DEFAULT 443,
+    dest                 TEXT NOT NULL DEFAULT 'www.microsoft.com:443',
+    server_names         TEXT NOT NULL DEFAULT '["www.microsoft.com"]',
+    private_key          TEXT NOT NULL DEFAULT '',
+    public_key           TEXT NOT NULL DEFAULT '',
+    fingerprint_default  TEXT NOT NULL DEFAULT 'chrome',
+    additional_config    TEXT NOT NULL DEFAULT '',
+    enabled              INTEGER NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+)"#;
+
+const CREATE_XRAY_CLIENTS: &str = r#"
+CREATE TABLE IF NOT EXISTS xray_clients_table (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER,
+    inbound_id          TEXT NOT NULL DEFAULT 'xray0',
+    name                TEXT NOT NULL,
+    uuid                TEXT NOT NULL UNIQUE,
+    short_id            TEXT NOT NULL UNIQUE,
+    expires_at          TEXT,
+    additional_config   TEXT,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id)    REFERENCES users_table(id),
+    FOREIGN KEY (inbound_id) REFERENCES xray_inbound_table(id)
+)"#;
+
 // ---------------------------------------------------------------------------
 // Hook templates
 // ---------------------------------------------------------------------------
@@ -637,6 +781,8 @@ fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(CREATE_HOOKS)?;
     conn.execute_batch(CREATE_GENERAL)?;
     conn.execute_batch(CREATE_ONE_TIME_LINKS)?;
+    conn.execute_batch(CREATE_XRAY_INBOUND)?;
+    conn.execute_batch(CREATE_XRAY_CLIENTS)?;
     apply_migrations(conn)?;
     Ok(())
 }
@@ -651,6 +797,34 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         )?;
         tracing::info!(
             "DB migration: added clients_table.advanced_security (per-peer AdvancedSecurity flag)"
+        );
+    }
+    // additional_config: free-form append-to-config text. Mirrors amnezia-client's
+    // additionalServerConfig / additionalClientConfig escape hatch — operators
+    // need a place to drop in lines awg-quick understands but the UI doesn't
+    // model (e.g. `Table = off`, `FwMark = …`).
+    if !column_exists(conn, "interfaces_table", "additional_config")? {
+        conn.execute_batch(
+            "ALTER TABLE interfaces_table ADD COLUMN additional_config TEXT NOT NULL DEFAULT ''",
+        )?;
+        tracing::info!(
+            "DB migration: added interfaces_table.additional_config (free-form Interface append)"
+        );
+    }
+    if !column_exists(conn, "clients_table", "additional_config")? {
+        conn.execute_batch(
+            "ALTER TABLE clients_table ADD COLUMN additional_config TEXT",
+        )?;
+        tracing::info!(
+            "DB migration: added clients_table.additional_config (per-peer free-form append)"
+        );
+    }
+    if !column_exists(conn, "user_configs_table", "default_additional_config")? {
+        conn.execute_batch(
+            "ALTER TABLE user_configs_table ADD COLUMN default_additional_config TEXT NOT NULL DEFAULT ''",
+        )?;
+        tracing::info!(
+            "DB migration: added user_configs_table.default_additional_config"
         );
     }
     // Rename the interface row from `wg0` (upstream awg-easy / wg-easy default)
@@ -757,6 +931,24 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
             r#"["0.0.0.0/0","::/0"]"#,
             "",
             51820,
+        ],
+    )?;
+
+    // xray_inbound default — disabled until the operator generates keys
+    // and confirms the dest. Defaults to www.microsoft.com:443 because it's
+    // reachable from most jurisdictions including ones that have blocked
+    // GitHub-related infra. Operator can change via the admin UI.
+    conn.execute(
+        "INSERT OR IGNORE INTO xray_inbound_table \
+         (id, port, dest, server_names, fingerprint_default, enabled) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            "xray0",
+            443,
+            "www.microsoft.com:443",
+            r#"["www.microsoft.com"]"#,
+            "chrome",
+            0,
         ],
     )?;
 
@@ -884,7 +1076,7 @@ const VALID_INTERFACE_COLUMNS: &[&str] = &[
     "name", "device", "port", "private_key", "public_key", "ipv4_cidr", "ipv6_cidr",
     "mtu", "j_c", "j_min", "j_max", "s1", "s2", "s3", "s4",
     "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
-    "j1", "j2", "j3", "itime", "firewall_enabled", "enabled",
+    "j1", "j2", "j3", "itime", "firewall_enabled", "additional_config", "enabled",
 ];
 
 pub fn update_interface(fields: &UpdateMap) -> Result<()> {
@@ -1018,7 +1210,7 @@ const VALID_CLIENT_COLUMNS: &[&str] = &[
     "pre_down", "post_down", "expires_at", "allowed_ips", "server_allowed_ips",
     "firewall_ips", "persistent_keepalive", "mtu", "j_c", "j_min", "j_max",
     "i1", "i2", "i3", "i4", "i5", "dns", "server_endpoint",
-    "advanced_security", "enabled",
+    "advanced_security", "additional_config", "enabled",
 ];
 
 pub fn update_client(id: i64, fields: &UpdateMap) -> Result<()> {
@@ -1162,6 +1354,7 @@ const VALID_USER_CONFIG_COLUMNS: &[&str] = &[
     "default_mtu", "default_persistent_keepalive", "default_dns", "default_allowed_ips",
     "default_j_c", "default_j_min", "default_j_max",
     "default_i1", "default_i2", "default_i3", "default_i4", "default_i5",
+    "default_additional_config",
     "host", "port",
 ];
 
@@ -1345,4 +1538,135 @@ pub fn next_ipv6(cidr: &str, used_ips: &[String]) -> Result<String> {
         }
     }
     Err(anyhow!("No available IPv6 address in {cidr}"))
+}
+
+// ---------------------------------------------------------------------------
+// Xray inbound + clients helpers
+// ---------------------------------------------------------------------------
+
+pub fn get_xray_inbound() -> Result<XrayInbound> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM xray_inbound_table WHERE id = 'xray0'",
+        [],
+        |row| XrayInbound::from_row(row),
+    )
+    .context("No xray_inbound row found")
+}
+
+const VALID_XRAY_INBOUND_COLUMNS: &[&str] = &[
+    "port", "dest", "server_names", "private_key", "public_key",
+    "fingerprint_default", "additional_config", "enabled",
+];
+
+pub fn update_xray_inbound(fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "xray_inbound_table",
+        "id",
+        WhereVal::Str("xray0"),
+        fields,
+        VALID_XRAY_INBOUND_COLUMNS,
+        &["id"],
+    )
+}
+
+/// Replace the inbound's keypair atomically. Used by the
+/// "regenerate keys" admin action — both columns move together so the
+/// inbound never lands in a state where the public key on disk doesn't
+/// pair with the private key in `realitySettings`.
+pub fn update_xray_keypair(private_key: &str, public_key: &str) -> Result<()> {
+    let mut fields = UpdateMap::new();
+    fields.insert("private_key".into(), private_key.into());
+    fields.insert("public_key".into(), public_key.into());
+    update_xray_inbound(&fields)
+}
+
+pub fn list_xray_clients() -> Result<Vec<XrayClient>> {
+    let c = conn();
+    let mut stmt = c.prepare(
+        "SELECT * FROM xray_clients_table ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| XrayClient::from_row(row))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_xray_client(id: i64) -> Result<XrayClient> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM xray_clients_table WHERE id = ?1",
+        params![id],
+        |row| XrayClient::from_row(row),
+    )
+    .context(format!("Xray client {id} not found"))
+}
+
+/// Data required to insert a new xray peer. `uuid` and `short_id` are
+/// generated by the caller (see `xray::keys`) so the DB layer never has
+/// to fork a process.
+#[derive(Debug, Clone)]
+pub struct CreateXrayClientParams {
+    pub user_id: Option<i64>,
+    pub inbound_id: String,
+    pub name: String,
+    pub uuid: String,
+    pub short_id: String,
+    pub expires_at: Option<String>,
+    pub additional_config: Option<String>,
+    pub enabled: bool,
+}
+
+pub fn create_xray_client(data: &CreateXrayClientParams) -> Result<i64> {
+    let c = conn();
+    c.execute(
+        "INSERT INTO xray_clients_table \
+         (user_id, inbound_id, name, uuid, short_id, expires_at, additional_config, enabled) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            data.user_id,
+            data.inbound_id,
+            data.name,
+            data.uuid,
+            data.short_id,
+            data.expires_at,
+            data.additional_config,
+            bool_to_int(data.enabled),
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+const VALID_XRAY_CLIENT_COLUMNS: &[&str] = &[
+    "user_id", "inbound_id", "name", "uuid", "short_id",
+    "expires_at", "additional_config", "enabled",
+];
+
+pub fn update_xray_client(id: i64, fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "xray_clients_table",
+        "id",
+        WhereVal::I64(id),
+        fields,
+        VALID_XRAY_CLIENT_COLUMNS,
+        &["id"],
+    )
+}
+
+pub fn delete_xray_client(id: i64) -> Result<()> {
+    let c = conn();
+    let n = c.execute(
+        "DELETE FROM xray_clients_table WHERE id = ?1",
+        params![id],
+    )?;
+    if n == 0 {
+        return Err(anyhow!("Xray client {id} not found"));
+    }
+    Ok(())
+}
+
+pub fn toggle_xray_client(id: i64, enabled: bool) -> Result<()> {
+    let mut fields = UpdateMap::new();
+    fields.insert("enabled".into(), bool_to_int(enabled).to_string());
+    update_xray_client(id, &fields)
 }

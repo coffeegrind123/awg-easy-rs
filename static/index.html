@@ -601,6 +601,49 @@ label { color: var(--fg-soft); }
    also get display:block and the sentence renders one word per line. */
 .danger-zone-text > span { font-size: 12px; color: var(--fg-mute); display: block; margin-top: 2px; }
 
+/* ============== SHARE HELP (Xray peer edit) ============== */
+.share-help {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+.share-option { display: flex; flex-direction: column; gap: 8px; }
+.share-option-head { display: flex; align-items: center; gap: 10px; }
+.share-tag {
+  font-size: 11px; color: var(--fg-faint);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.share-option-text { font-size: 12.5px; color: var(--fg-mute); line-height: 1.55; }
+.share-option-text ul { margin: 6px 0 0 18px; padding: 0; }
+.share-option-text li { margin: 2px 0; }
+.share-option-text b { color: var(--fg); font-weight: 600; }
+.share-note {
+  display: flex; gap: 10px; align-items: flex-start;
+  font-size: 11.5px; color: var(--fg-faint);
+  padding-top: 10px; border-top: 1px dashed var(--border);
+}
+.share-note svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; }
+.share-note i { color: var(--fg-mute); }
+
+/* ============== EMPTY-STATE HELP ============== */
+.empty-help {
+  margin-top: 22px;
+  text-align: left;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.02);
+  max-width: 640px; margin-left: auto; margin-right: auto;
+}
+.empty-help-title { font-size: 12px; font-weight: 600; color: var(--fg); margin-bottom: 10px; letter-spacing: 0.02em; text-transform: uppercase; }
+.empty-help-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--fg-mute); line-height: 1.6; }
+.empty-help-list li { margin: 4px 0; }
+.empty-help-list b { color: var(--fg); font-weight: 600; }
+
 /* ============== PAGE HEAD ============== */
 .page-head {
   display: flex; align-items: center; gap: 12px;
@@ -843,6 +886,8 @@ label { color: var(--fg-soft); }
     <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
     <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
     <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 7h.01M6 17.5h.01"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
@@ -879,10 +924,14 @@ label { color: var(--fg-soft); }
       <div class="brand-name">awg-easy<small>VPN manager</small></div>
     </a>
     <div class="nav-section" id="nav-links">
-      <div class="nav-label">Workspace</div>
-      <button class="nav-item" data-route="/" onclick="navigate('/')">
-        <svg><use href="#i-users"/></svg> Clients <span class="pill" id="side-peer-count">—</span>
+      <div class="nav-label">Modes</div>
+      <button class="nav-item" data-route="/" onclick="navigate('/')" title="AmneziaWG: low-latency, full-tunnel, gaming-friendly UDP transport.">
+        <svg><use href="#i-users"/></svg> Gaming <span class="pill" id="side-peer-count">—</span>
       </button>
+      <button class="nav-item" data-route="/xray" onclick="navigate('/xray')" title="Xray VLESS+Reality+Vision: TCP/443 camouflaged behind a real CDN host. Browser-friendly.">
+        <svg><use href="#i-globe"/></svg> Browsing <span class="pill" id="side-xray-count">—</span>
+      </button>
+      <div class="nav-label">Workspace</div>
       <button class="nav-item" data-route="/me" onclick="navigate('/me')">
         <svg><use href="#i-user"/></svg> Account
       </button>
@@ -940,6 +989,33 @@ label { color: var(--fg-soft); }
       <div class="scroll">
         <div class="crumb"><a onclick="navigate('/')">Clients</a><svg><use href="#i-chevron-right"/></svg><b id="edit-crumb-name">—</b></div>
         <div id="edit-form"></div>
+      </div>
+    </div>
+
+    <!-- ========== XRAY (Browsing mode) ========== -->
+    <div id="page-xray" class="page">
+      <div class="top">
+        <h1 class="page-title">Browsing peers <span class="page-title-count" id="xray-count">—</span></h1>
+        <div class="top-spacer"></div>
+        <span class="sub" id="xray-status-pill" style="margin-right:10px"></span>
+        <button class="btn btn--ghost btn--icon" title="Refresh" onclick="refreshXrayClients()"><svg><use href="#i-refresh"/></svg></button>
+        <button class="btn btn--primary" id="xray-create-btn" onclick="showXrayCreateModal()"><svg><use href="#i-plus"/></svg> New peer</button>
+      </div>
+      <div class="scroll">
+        <div id="xray-empty" class="empty" style="display:none"></div>
+        <div id="xray-list"></div>
+      </div>
+    </div>
+
+    <div id="page-xray-edit" class="page">
+      <div class="top">
+        <button class="btn btn--quiet btn--icon" onclick="navigate('/xray')" title="Back"><svg><use href="#i-chevron-left"/></svg></button>
+        <h1 class="page-title" style="font-size:16px">Edit Xray peer</h1>
+        <div class="top-spacer"></div>
+      </div>
+      <div class="scroll">
+        <div class="crumb"><a onclick="navigate('/xray')">Browsing</a><svg><use href="#i-chevron-right"/></svg><b id="xray-edit-crumb-name">—</b></div>
+        <div id="xray-edit-form"></div>
       </div>
     </div>
 
@@ -1025,8 +1101,11 @@ label { color: var(--fg-soft); }
             <div class="group-label">Server</div>
             <a href="#/admin" data-tab="general" onclick="showAdminTab('general',event)" class="active">General</a>
             <a href="#/admin" data-tab="config" onclick="showAdminTab('config',event)">Defaults</a>
+            <div class="group-label">Gaming (AmneziaWG)</div>
             <a href="#/admin" data-tab="interface" onclick="showAdminTab('interface',event)">Interface</a>
             <a href="#/admin" data-tab="hooks" onclick="showAdminTab('hooks',event)">Hooks</a>
+            <div class="group-label">Browsing (Xray Reality)</div>
+            <a href="#/admin" data-tab="xray" onclick="showAdminTab('xray',event)">Inbound</a>
           </nav>
           <div class="admin-content" id="admin-content"></div>
         </div>

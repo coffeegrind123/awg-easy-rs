@@ -160,6 +160,15 @@ function routeInternal(path) {
     $('page-admin').classList.add('active');
     renderNav();
     showAdminTab(ADMIN_TAB);
+  } else if (path === '/xray') {
+    $('page-xray').classList.add('active');
+    renderNav();
+    refreshXrayClients();
+  } else if (path.startsWith('/xray/clients/')) {
+    $('page-xray-edit').classList.add('active');
+    renderNav();
+    const id = path.split('/')[3];
+    loadXrayClientEdit(id);
   } else {
     $('page-clients').classList.add('active');
     renderNav();
@@ -250,6 +259,7 @@ function renderNav() {
   let activeRoute = '/';
   if (path === '/me') activeRoute = '/me';
   else if (path === '/admin') activeRoute = '/admin';
+  else if (path === '/xray' || path.startsWith('/xray/')) activeRoute = '/xray';
   else if (path === '/' || path.startsWith('/clients/')) activeRoute = '/';
 
   document.querySelectorAll('[data-route]').forEach(el => {
@@ -780,6 +790,10 @@ async function loadClientEdit(id) {
               <option value="off" ${advsec === 'off' ? 'selected' : ''}>Off — force disable</option>
             </select>
           </div>
+          <div class="field" style="margin-top:14px">
+            <label class="field-label" for="edit-extra" title="Free-form text appended verbatim to this peer's [Interface] block. Empty falls back to the admin default.">Additional config <span class="opt">overrides default</span></label>
+            <textarea id="edit-extra" rows="3" placeholder="(inherit default)">${esc(c.additionalConfig || '')}</textarea>
+          </div>
         </div>
       </div>
 
@@ -826,6 +840,9 @@ async function saveClient(id) {
   if (advsec === 'on') body.advancedSecurity = true;
   else if (advsec === 'off') body.advancedSecurity = false;
   else if (advsec === 'auto') body.advancedSecurity = null;
+  // additionalConfig is always sent (admins-only on the server side); empty
+  // string clears the per-peer override and falls back to the UC default.
+  body.additionalConfig = $('edit-extra').value;
   const expires = $('edit-expires').value;
   body.expiresAt = expires ? new Date(expires).toISOString() : null;
   try {
@@ -983,6 +1000,10 @@ async function showAdminTab(tab, e) {
                       <span class="input-suffix">seconds</span>
                     </div>
                   </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-default-extra" title="Free-form text appended to the [Interface] block of every generated client .conf. Per-client override on the edit page.">Default additional client config</label>
+                  <textarea id="adm-default-extra" class="mono-input" rows="3" placeholder="(empty — e.g. Table = off)">${esc(uc.defaultAdditionalConfig || '')}</textarea>
                 </div>
               </div>
               <div style="display:flex;justify-content:flex-end;margin-top:18px">
@@ -1143,6 +1164,21 @@ async function showAdminTab(tab, e) {
             </div>
           </div>
 
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">Additional server config</div>
+                <div class="card-sub">Free-form text appended to the server <span class="mono">[Interface]</span> block. Useful for keys awg-quick understands but the UI doesn't model (e.g. <span class="mono">Table = off</span>, <span class="mono">FwMark</span>). Lines you write here are emitted verbatim — a typo will block interface bring-up.</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="field">
+                <label class="field-label" for="adm-if-extra" title="Appended verbatim to the server [Interface] block">Additional config</label>
+                <textarea id="adm-if-extra" rows="4" placeholder="(empty)">${esc(iface.additionalConfig || '')}</textarea>
+              </div>
+            </div>
+          </div>
+
           <div class="save-bar">
             <span class="changed">Changes need a restart</span>
             <div class="save-bar-spacer"></div>
@@ -1191,6 +1227,88 @@ async function showAdminTab(tab, e) {
             </form>
           </div>
         </div>`;
+    } else if (tab === 'xray') {
+      const inbound = await GET('/api/admin/xray/inbound');
+      const status = await GET('/api/admin/xray/status').catch(() => null);
+      const candidates = await GET('/api/admin/xray/inbound/dest-candidates').catch(() => []);
+      const candOptions = (candidates || []).map(c => `<option value="${esc(c)}:443">${esc(c)}</option>`).join('');
+      const stateLabel = status ? (
+        status.state === 'running' ? `<span class="pill pill--ok">Running · pid ${status.pid} · ${Math.round(status.uptime_seconds || 0)}s</span>`
+        : status.state === 'crashed' ? `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed × ${status.restart_attempts}</span>`
+        : `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`
+      ) : '<span class="pill">unknown</span>';
+      el.innerHTML = `
+        <div class="notice notice--info" style="margin-bottom:14px">
+          <svg><use href="#i-shield"/></svg>
+          <div>VLESS + Reality + Vision over TCP/${inbound.port}. Vision splices the inner TLS so the wire pattern matches a single TLS session — needs a clean IP and a reachable <span class="mono">dest</span>. <a href="https://docs.amnezia.org/" target="_blank" rel="noopener">More on Reality</a></div>
+        </div>
+        <div style="margin-bottom:14px">
+          Bundled Xray ${esc(inbound.xrayVersion || '?')} · supervisor: ${stateLabel}
+        </div>
+        <form onsubmit="saveXrayInbound(event)">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">Reality inbound</div>
+                <div class="card-sub">Single TCP/443 listener. Clients send ClientHello with SNI = the first server name; if it matches the dest's leaf cert, Xray transparently proxies to the real site.</div>
+              </div>
+              <label class="toggle ${inbound.enabled ? 'is-on' : ''}" title="Master switch — turning this off stops the supervisor and tears down /etc/wireguard/xray/server.json">
+                <input type="checkbox" id="adm-xr-enabled" ${inbound.enabled ? 'checked' : ''}>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-label">Enabled</span>
+              </label>
+            </div>
+            <div class="card-body">
+              <div class="stack">
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-xr-port" title="TCP port Xray listens on. 443 is the only port that's convincing camouflage; non-443 ports are Reality's #1 telltale.">Listen port</label>
+                    <input type="number" id="adm-xr-port" class="mono-input" value="${inbound.port}">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-xr-fp" title="uTLS fingerprint baked into share links. Chrome and Firefox are the most convincing — Safari and randomized are flagged by some DPI vendors.">Default fingerprint</label>
+                    <select id="adm-xr-fp">
+                      ${['chrome','firefox','safari','ios','android','edge','random'].map(f => `<option value="${f}" ${inbound.fingerprintDefault===f?'selected':''}>${f}</option>`).join('')}
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-xr-dest" title="The real upstream Xray fronts. Must terminate TLS 1.3 and present a cert whose SAN covers the SNI below. GitHub-related infra is intermittently blocked — pick something else.">Dest (host:port)</label>
+                  <div style="display:flex;gap:8px">
+                    <input type="text" id="adm-xr-dest" class="mono-input" value="${esc(inbound.dest)}" style="flex:1">
+                    <select id="adm-xr-cand" onchange="if(this.value){$('adm-xr-dest').value=this.value;$('adm-xr-sni').value=this.value.split(':')[0]}">
+                      <option value="">— pick from curated list —</option>
+                      ${candOptions}
+                    </select>
+                    <button type="button" class="btn btn--ghost" onclick="probeXrayDest()">Probe</button>
+                  </div>
+                  <div class="sub" id="adm-xr-probe-result" style="margin-top:6px"></div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-xr-sni" title="SNI clients send. Must be a SAN on the dest's leaf cert. The first entry is canonical; additional names support multi-tenant CDNs.">Server names (one per line)</label>
+                  <textarea id="adm-xr-sni" class="mono-input" rows="2">${esc((inbound.serverNames || []).join('\n'))}</textarea>
+                </div>
+                <div class="field">
+                  <label class="field-label" title="x25519 keypair Reality uses to authenticate clients. Public key goes into share links; private key stays in the SQLite DB. Regenerating invalidates every existing peer's vless:// link.">Reality keypair</label>
+                  <div style="display:flex;gap:10px;align-items:center">
+                    <input type="text" class="mono-input" readonly value="${inbound.publicKey ? 'pbk: ' + esc(inbound.publicKey) : '(no keypair yet)'}" style="flex:1">
+                    <button type="button" class="btn btn--ghost" onclick="regenerateXrayKeys()">${inbound.hasPrivateKey ? 'Regenerate' : 'Generate'}</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-xr-extra" title="Free-form JSON object deep-merged into the inbound. Use for sniffing tweaks, fallbacks, or anything the UI doesn't model. Bad JSON will block the save.">Additional inbound config</label>
+                  <textarea id="adm-xr-extra" class="mono-input" rows="3" placeholder='(empty — e.g. {"sniffing":{"routeOnly":false}})'>${esc(inbound.additionalConfig || '')}</textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="save-bar">
+            <span class="changed">Changes apply on save (SIGHUP — no peer drops)</span>
+            <div class="save-bar-spacer"></div>
+            <button type="button" class="btn btn--ghost" onclick="restartXray()"><svg><use href="#i-refresh"/></svg> Restart Xray</button>
+            <button type="submit" class="btn btn--primary">Save changes</button>
+          </div>
+        </form>`;
     }
   } catch(err) {
     showToast(err.message, 'error');
@@ -1227,7 +1345,8 @@ async function saveAdminConfig(e) {
       defaultDns: $('adm-dns').value.split(',').map(s => s.trim()).filter(Boolean),
       defaultAllowedIps: $('adm-allowedips').value.split(',').map(s => s.trim()).filter(Boolean),
       defaultMtu: parseInt($('adm-mtu').value) || 1420,
-      defaultPersistentKeepalive: parseInt($('adm-keepalive').value) || 0
+      defaultPersistentKeepalive: parseInt($('adm-keepalive').value) || 0,
+      defaultAdditionalConfig: $('adm-default-extra').value
     });
     showToast('Saved', 'success');
   } catch(e) { showToast(e.message, 'error'); }
@@ -1285,7 +1404,8 @@ async function saveAdminInterface(e) {
       i2: $('adm-if-i2').value,
       i3: $('adm-if-i3').value,
       i4: $('adm-if-i4').value,
-      i5: $('adm-if-i5').value
+      i5: $('adm-if-i5').value,
+      additionalConfig: $('adm-if-extra').value
     });
     showToast('Saved', 'success');
   } catch(e) { showToast(e.message, 'error'); }
@@ -1365,5 +1485,310 @@ async function setupFinish(e) {
     });
     showToast('Setup complete!', 'success');
     setTimeout(() => navigate('/login'), 1200);
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ===================== XRAY (Browsing mode) =====================
+
+let XRAY_REFRESH_TIMER = null;
+
+async function refreshXrayClients() {
+  if (XRAY_REFRESH_TIMER) { clearTimeout(XRAY_REFRESH_TIMER); XRAY_REFRESH_TIMER = null; }
+  try {
+    const list = await GET('/api/xray/clients');
+    const status = await GET('/api/admin/xray/status').catch(() => null);
+    renderXrayClients(list || [], status);
+    $('xray-count').textContent = (list || []).length || '';
+    $('side-xray-count').textContent = (list || []).length || '—';
+  } catch(e) {
+    if (USER) showToast(e.message, 'error');
+  }
+  // No live transfer rates for Xray (would need stats API); refresh
+  // every 15s for status updates only.
+  if (window.location.hash === '#/xray') {
+    XRAY_REFRESH_TIMER = setTimeout(refreshXrayClients, 15000);
+  }
+}
+
+function renderXrayClients(clients, status) {
+  const list = $('xray-list');
+  const empty = $('xray-empty');
+  const isAdmin = USER && USER.role === 1;
+  const createBtn = $('xray-create-btn');
+
+  // Surface supervisor state in the top pill.
+  const pill = $('xray-status-pill');
+  if (status) {
+    if (status.state === 'running') {
+      pill.innerHTML = `<span class="pill pill--ok">Running · pid ${status.pid}</span>`;
+    } else if (status.state === 'crashed') {
+      pill.innerHTML = `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed × ${status.restart_attempts}</span>`;
+    } else {
+      pill.innerHTML = `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`;
+    }
+  } else {
+    pill.textContent = '';
+  }
+
+  if (!clients.length) {
+    list.innerHTML = '';
+    empty.style.display = '';
+    empty.innerHTML = isAdmin
+      ? `<h3>No Browsing peers yet</h3>
+         <p>Click <b>New peer</b> to issue your first <span class="mono">vless://</span> share. Reality keys must be generated on the <a onclick="navigate('/admin')">Admin → Inbound</a> tab first.</p>
+         <div class="empty-help">
+           <div class="empty-help-title">How users connect</div>
+           <ol class="empty-help-list">
+             <li>Issue a peer here → click the <span class="mono">vless://</span> button to copy the URL, or <span class="mono">QR</span> to show a code.</li>
+             <li>User opens <b>Amnezia VPN</b> (iOS / Android / desktop), <b>v2rayN</b>, <b>v2rayNG</b>, <b>NekoBox</b>, <b>Hiddify</b>, <b>Streisand</b>, <b>Shadowrocket</b>, or <b>FoXray</b>.</li>
+             <li>In their app, <span class="mono">+ Add server → Configuration file or text</span> (or <span class="mono">Scan QR</span>) → paste / scan.</li>
+             <li>Connect. Their app marks the server as <i>third-party</i>; that's expected — peer management stays here.</li>
+           </ol>
+         </div>`
+      : `<h3>No Browsing peers issued for your account</h3>
+         <p>Ask an admin to create one.</p>`;
+    if (createBtn) createBtn.style.display = isAdmin ? '' : 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  if (createBtn) createBtn.style.display = isAdmin ? '' : 'none';
+
+  list.innerHTML = clients.map(c => `
+    <div class="peer-card ${c.enabled ? '' : 'is-disabled'}">
+      <div class="peer-main">
+        <div class="peer-name">
+          <button class="peer-name-link" onclick="navigate('/xray/clients/${c.id}')">${esc(c.name)}</button>
+          ${c.enabled ? '' : '<span class="pill">disabled</span>'}
+        </div>
+        <div class="peer-meta">
+          <span class="mono">${esc(c.uuid.slice(0, 8))}…</span>
+          <span style="color:var(--fg-faint)">·</span>
+          <span title="Reality short-id (per-peer)">sid: ${esc(c.shortId)}</span>
+        </div>
+      </div>
+      <div class="peer-actions">
+        <button class="btn btn--quiet btn--icon" title="Copy vless:// share URL.&#10;&#10;Paste into:&#10;• Amnezia VPN — Add server → Configuration file or text&#10;• v2rayN / v2rayNG — server list → import URL/clipboard&#10;• Hiddify, NekoBox, Streisand, Shadowrocket, FoXray — same flow" onclick="copyXrayShare(${c.id})">vless://</button>
+        <button class="btn btn--quiet btn--icon" title="QR code.&#10;&#10;Scan from inside:&#10;• Amnezia VPN — Add server → Scan QR&#10;• v2rayNG, Hiddify, NekoBox, Shadowrocket — server list → scan&#10;Or save the SVG and import as image" onclick="showXrayQr(${c.id}, '${escJs(c.name)}')">QR</button>
+        ${isAdmin ? `<button class="btn btn--quiet btn--icon" title="Edit" onclick="navigate('/xray/clients/${c.id}')"><svg><use href="#i-edit"/></svg></button>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function showXrayCreateModal() {
+  const name = prompt('Name for new Browsing peer:');
+  if (!name || !name.trim()) return;
+  POST('/api/xray/clients', { name: name.trim() })
+    .then(() => { showToast('Peer created', 'success'); refreshXrayClients(); })
+    .catch(e => showToast(e.message, 'error'));
+}
+
+async function copyXrayShare(id) {
+  try {
+    const resp = await fetch('/api/xray/clients/' + id + '/share', { credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(await resp.text() || resp.statusText);
+    const url = await resp.text();
+    await navigator.clipboard.writeText(url);
+    showToast('vless:// URL copied', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function showXrayQr(id, name) {
+  try {
+    const resp = await fetch('/api/xray/clients/' + id + '/qrcode.svg', { credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(await resp.text() || resp.statusText);
+    const svg = await resp.text();
+    // Reuse the existing QR modal if present, else open a new window.
+    const modal = $('modal-qr');
+    if (modal) {
+      $('modal-qr-title').textContent = 'QR for ' + name;
+      $('modal-qr-body').innerHTML = svg;
+      modal.classList.add('active');
+    } else {
+      const w = window.open('', '_blank', 'width=420,height=480');
+      if (w) {
+        w.document.write('<html><head><title>QR — ' + esc(name) + '</title></head><body style="margin:0;display:flex;align-items:center;justify-content:center;background:#111">' + svg + '</body></html>');
+      }
+    }
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function loadXrayClientEdit(id) {
+  $('xray-edit-crumb-name').textContent = 'Loading…';
+  try {
+    const c = await GET('/api/xray/clients/' + id);
+    $('xray-edit-crumb-name').textContent = c.name;
+    const isAdmin = USER && USER.role === 1;
+    $('xray-edit-form').innerHTML = `
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">${esc(c.name)}</div>
+            <div class="card-sub">UUID: <span class="mono">${esc(c.uuid)}</span> · shortId: <span class="mono">${esc(c.shortId)}</span></div>
+          </div>
+          <label class="toggle ${c.enabled ? 'is-on' : ''}">
+            <input type="checkbox" id="xredit-enabled" ${c.enabled ? 'checked' : ''} ${isAdmin?'':'disabled'}>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-label">Enabled</span>
+          </label>
+        </div>
+        <div class="card-body">
+          <div class="stack">
+            <div class="field">
+              <label class="field-label" for="xredit-name">Display name</label>
+              <input type="text" id="xredit-name" value="${esc(c.name)}" ${isAdmin?'':'disabled'}>
+            </div>
+            <div class="field">
+              <label class="field-label" for="xredit-expires" title="Optional expiry. After this time the peer is disabled and the supervisor reloads to drop the shortId.">Expires</label>
+              <input type="datetime-local" id="xredit-expires" value="${c.expiresAt ? new Date(c.expiresAt).toISOString().slice(0,16) : ''}" ${isAdmin?'':'disabled'}>
+            </div>
+            <div class="field">
+              <label class="field-label" for="xredit-extra" title="Free-form text appended to this peer's clients[] entry — typically empty. Server-only — clients don't see this.">Additional config (JSON, optional)</label>
+              <textarea id="xredit-extra" rows="3" placeholder="(empty)" ${isAdmin?'':'disabled'}>${esc(c.additionalConfig || '')}</textarea>
+            </div>
+            <div class="field">
+              <label class="field-label">Share with the user</label>
+              <div class="share-help">
+                <div class="share-option">
+                  <div class="share-option-head">
+                    <button class="btn btn--ghost btn--sm" type="button" onclick="copyXrayShare(${c.id})">Copy vless://</button>
+                    <span class="share-tag">universal</span>
+                  </div>
+                  <div class="share-option-text">
+                    Standard <span class="mono">vless://</span> URL. Paste into the user's app:
+                    <ul>
+                      <li><b>Amnezia VPN</b> (iOS / Android / desktop): <span class="mono">+ Add server → Configuration file or text → paste</span></li>
+                      <li><b>v2rayN</b> (Windows): <span class="mono">Servers → Import bulk URL from clipboard</span></li>
+                      <li><b>v2rayNG</b> (Android): <span class="mono">+ → Import config from clipboard</span></li>
+                      <li><b>NekoBox / NekoRay, Hiddify, Streisand, Shadowrocket, FoXray</b>: same — import-from-clipboard</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="share-option">
+                  <div class="share-option-head">
+                    <button class="btn btn--ghost btn--sm" type="button" onclick="showXrayQr(${c.id}, '${escJs(c.name)}')">Show QR code</button>
+                    <span class="share-tag">scan with phone</span>
+                  </div>
+                  <div class="share-option-text">
+                    Same <span class="mono">vless://</span> URL encoded as a QR. Scan from the user's app:
+                    <ul>
+                      <li><b>Amnezia VPN</b>: <span class="mono">+ Add server → Scan QR</span></li>
+                      <li><b>v2rayNG / NekoBox / Hiddify / Shadowrocket</b>: scan from server-list screen</li>
+                    </ul>
+                    Or save the SVG and import as image if the device has no camera.
+                  </div>
+                </div>
+                <div class="share-option">
+                  <div class="share-option-head">
+                    <a class="btn btn--ghost btn--sm" href="/api/xray/clients/${c.id}/json" target="_blank" rel="noopener">Amnezia JSON</a>
+                    <span class="share-tag">Amnezia VPN only</span>
+                  </div>
+                  <div class="share-option-text">
+                    Native <span class="mono">server.json</span> in the format Amnezia VPN exports its own configs in.
+                    Use this only when <span class="mono">vless://</span> import is failing on a particularly old build —
+                    paste contents into <span class="mono">+ Add server → Configuration file or text</span>.
+                    Other apps (v2rayN/Hiddify/etc.) won't accept this format.
+                  </div>
+                </div>
+                <div class="share-note">
+                  <svg><use href="#i-shield"/></svg>
+                  Imported configs are marked <i>third-party</i> in the user's app — they connect, but can't manage the server. That's by design: peer creation lives here.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      ${isAdmin ? `
+      <div class="danger-zone" style="margin-top:18px">
+        <div class="danger-zone-text">
+          <b>Delete peer</b>
+          <span>Removes <span class="mono">${esc(c.name)}</span>'s shortId and UUID. Existing clients with this share will fail with "client not found".</span>
+        </div>
+        <button class="btn btn--danger" onclick="confirmXrayDelete(${c.id}, '${escJs(c.name)}')"><svg><use href="#i-trash"/></svg> Delete peer</button>
+      </div>
+      <div class="save-bar">
+        <span class="changed">Changes reload Xray (SIGHUP)</span>
+        <div class="save-bar-spacer"></div>
+        <button class="btn btn--ghost" onclick="loadXrayClientEdit(${c.id})">Discard</button>
+        <button class="btn btn--primary" onclick="saveXrayClient(${c.id})">Save</button>
+      </div>` : ''}
+    `;
+    injectTooltips();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveXrayClient(id) {
+  const expires = $('xredit-expires').value;
+  const body = {
+    name: $('xredit-name').value,
+    enabled: $('xredit-enabled').checked,
+    expires_at: expires ? new Date(expires).toISOString() : null,
+    additionalConfig: $('xredit-extra').value
+  };
+  try {
+    await POST('/api/xray/clients/' + id, body);
+    showToast('Saved', 'success');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function confirmXrayDelete(id, name) {
+  if (!confirm('Delete Browsing peer "' + name + '"? Their share URL will stop working immediately.')) return;
+  DEL('/api/xray/clients/' + id)
+    .then(() => { showToast('Peer deleted', 'success'); navigate('/xray'); })
+    .catch(e => showToast(e.message, 'error'));
+}
+
+// --- Admin: Xray inbound -------------------------------------------------
+
+async function saveXrayInbound(e) {
+  e.preventDefault();
+  const sni = $('adm-xr-sni').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!sni.length) { showToast('At least one server name is required', 'error'); return; }
+  const body = {
+    port: parseInt($('adm-xr-port').value) || 443,
+    dest: $('adm-xr-dest').value.trim(),
+    serverNames: sni,
+    fingerprintDefault: $('adm-xr-fp').value,
+    additionalConfig: $('adm-xr-extra').value,
+    enabled: $('adm-xr-enabled').checked
+  };
+  try {
+    await POST('/api/admin/xray/inbound', body);
+    showToast('Saved', 'success');
+    showAdminTab('xray');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function regenerateXrayKeys() {
+  if (!confirm('Regenerate the Reality keypair? Every existing Browsing peer\'s vless:// link becomes invalid — you\'ll need to redistribute QR codes.')) return;
+  try {
+    const r = await POST('/api/admin/xray/inbound/regenerate-keys', {});
+    showToast('Keypair generated; pbk: ' + (r.publicKey || '').slice(0, 16) + '…', 'success');
+    showAdminTab('xray');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function probeXrayDest() {
+  const dest = $('adm-xr-dest').value.trim();
+  const sni = $('adm-xr-sni').value.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+  if (!dest || !sni) { showToast('Need both dest and a server name', 'error'); return; }
+  const out = $('adm-xr-probe-result');
+  out.textContent = 'Probing…';
+  try {
+    const r = await POST('/api/admin/xray/inbound/probe-dest', { dest, sni });
+    const status = r.ok ? '<span class="pill pill--ok">OK</span>' : '<span class="pill pill--err">Reject</span>';
+    const warn = (r.warnings || []).map(w => `<div style="color:var(--fg-warn)">⚠ ${esc(w)}</div>`).join('');
+    out.innerHTML = `${status} TLS ${esc(r.tls_version)} · ALPN ${esc(r.alpn || 'none')} · ${r.rtt_ms}ms · SAN match: ${r.sni_matches_san ? 'yes' : 'no'}${warn ? '<br>' + warn : ''}`;
+  } catch(e) {
+    out.innerHTML = '<span class="pill pill--err">Probe failed</span> ' + esc(e.message);
+  }
+}
+
+async function restartXray() {
+  try {
+    await POST('/api/admin/xray/restart', {});
+    showToast('Xray restarted', 'success');
+    showAdminTab('xray');
   } catch(e) { showToast(e.message, 'error'); }
 }

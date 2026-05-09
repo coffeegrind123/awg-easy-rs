@@ -95,6 +95,11 @@ pub struct UpdateClientRequest {
         deserialize_with = "deserialize_tristate_bool"
     )]
     advanced_security: Option<Option<bool>>,
+    /// Free-form `[Interface]` append on the generated client config.
+    /// Empty string clears the per-peer override; a non-empty string
+    /// replaces it. `None` (field absent) leaves the column untouched.
+    #[serde(rename = "additionalConfig")]
+    additional_config: Option<String>,
 }
 
 fn deserialize_tristate_bool<'de, D>(de: D) -> Result<Option<Option<bool>>, D::Error>
@@ -170,6 +175,7 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         "dns": parse_arr(&client.dns),
         "serverEndpoint": client.server_endpoint,
         "advancedSecurity": client.advanced_security,
+        "additionalConfig": client.additional_config,
         "enabled": client.enabled,
         "createdAt": client.created_at,
         "updatedAt": client.updated_at,
@@ -478,6 +484,7 @@ pub async fn update_client(
             (body.post_down.is_some(), "postDown"),
             (body.server_endpoint.is_some(), "serverEndpoint"),
             (body.advanced_security.is_some(), "advancedSecurity"),
+            (body.additional_config.is_some(), "additionalConfig"),
         ];
         if let Some((_, field)) = admin_only.iter().find(|(present, _)| *present) {
             return Err(api_err(
@@ -537,6 +544,7 @@ pub async fn update_client(
     if let Some(ref v) = body.i3 { fields.insert("i3".into(), v.clone()); }
     if let Some(ref v) = body.i4 { fields.insert("i4".into(), v.clone()); }
     if let Some(ref v) = body.i5 { fields.insert("i5".into(), v.clone()); }
+    if let Some(ref v) = body.additional_config { fields.insert("additional_config".into(), v.clone()); }
     // Tri-state mapping for AdvancedSecurity:
     //   Some(Some(v)) → write 1/0 via the generic UPDATE
     //   Some(None)    → write SQL NULL (clears override → kernel auto-detect)
