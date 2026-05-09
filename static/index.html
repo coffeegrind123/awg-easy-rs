@@ -1,272 +1,1115 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
 <meta name="referrer" content="no-referrer">
 <title>AmneziaWG Easy</title>
+<link rel="icon" href="/favicon.png">
 <style>
 :root {
-  --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460;
-  --fg: #e0e0e0; --fg2: #a0a0b0; --fg3: #707080;
-  --accent: #FBB26A; --accent2: #e8923a;
-  --red: #ef4444; --green: #22c55e; --yellow: #eab308;
-  --border: #2a2a4a; --radius: 8px; --shadow: 0 2px 8px rgba(0,0,0,0.3);
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --mono: 'SF Mono', 'Fira Code', monospace;
+  --bg-page: #050509;
+  --bg: #0b0b13;
+  --bg-surface: #11111c;
+  --bg-elevated: #181826;
+  --bg-input: #0a0a13;
+  --bg-row: #0d0d16;
+  --bg-row-hover: #15151f;
+
+  --border: #1f1f2c;
+  --border-strong: #292936;
+  --border-faint: #181822;
+
+  --fg: #ebebef;
+  --fg-soft: #c9c9d1;
+  --fg-mute: #8a8a95;
+  --fg-faint: #5a5a64;
+  --fg-dim: #3e3e48;
+
+  --accent: #FBB26A;
+  --accent-hi: #fdc285;
+  --accent-lo: #e8923a;
+  --accent-tint: rgba(251, 178, 106, 0.10);
+  --accent-line: rgba(251, 178, 106, 0.30);
+
+  --ok: #4ade80;
+  --ok-tint: rgba(74, 222, 128, 0.14);
+  --warn: #fbbf24;
+  --warn-tint: rgba(251, 191, 36, 0.14);
+  --danger: #f87171;
+  --danger-tint: rgba(248, 113, 113, 0.12);
+  --info: #7aa2ff;
+
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 48px -24px rgba(0, 0, 0, 0.8);
 }
-[data-theme="light"] {
-  --bg: #f5f5f5; --bg2: #ffffff; --bg3: #e8e8f0;
-  --fg: #1a1a2e; --fg2: #4a4a5a; --fg3: #6a6a7a;
-  --accent: #d4760a; --accent2: #b86508;
-  --border: #d0d0e0;
-}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: var(--font); background: var(--bg); color: var(--fg); min-height: 100vh; }
-.container { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
-header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 0; position: sticky; top: 0; z-index: 100; }
-header .container { display: flex; align-items: center; gap: 16px; }
-.logo { font-size: 20px; font-weight: 700; color: var(--accent); text-decoration: none; display: flex; align-items: center; gap: 8px; }
-.logo svg { width: 28px; height: 28px; }
-.nav { display: flex; gap: 8px; margin-left: auto; align-items: center; }
-.nav a, .nav button { color: var(--fg2); text-decoration: none; padding: 6px 12px; border-radius: var(--radius); border: none; background: none; cursor: pointer; font-size: 14px; font-family: var(--font); }
-.nav a:hover, .nav button:hover { background: var(--bg3); color: var(--fg); }
-.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius); font-size: 14px; font-weight: 500; cursor: pointer; border: none; font-family: var(--font); transition: all 0.15s; }
-.btn-primary { background: var(--accent); color: #000; }
-.btn-primary:hover { background: var(--accent2); }
-.btn-secondary { background: var(--bg3); color: var(--fg); }
-.btn-secondary:hover { background: var(--border); }
-.btn-danger { background: var(--red); color: #fff; }
-.btn-sm { padding: 4px 10px; font-size: 13px; }
-input, textarea, select { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; color: var(--fg); font-size: 14px; font-family: var(--font); width: 100%; }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
-label { display: block; font-size: 13px; color: var(--fg2); margin-bottom: 4px; font-weight: 500; }
-.form-group { margin-bottom: 16px; }
-.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
-.card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-.card-title { font-weight: 600; font-size: 16px; }
-.panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin: 24px 0; }
+html, body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; min-height: 100vh; }
+::selection { background: var(--accent-tint); color: var(--accent-hi); }
+button { font: inherit; color: inherit; cursor: pointer; }
+a { color: inherit; }
+
+/* ============== APP SHELL ============== */
+.shell {
+  display: grid;
+  grid-template-columns: 224px 1fr;
+  min-height: 100vh;
+}
+.aside {
+  background: linear-gradient(180deg, var(--bg-surface) 0%, var(--bg) 100%);
+  border-right: 1px solid var(--border);
+  padding: 18px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 10;
+}
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 18px;
+  text-decoration: none;
+  color: inherit;
+}
+.brand-mark {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-lo) 100%);
+  display: grid; place-items: center;
+  color: #0b0b13;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.brand-mark svg { width: 16px; height: 16px; }
+.brand-name { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+.brand-name small { display: block; font-weight: 500; font-size: 11px; color: var(--fg-faint); letter-spacing: 0.04em; text-transform: uppercase; }
+
+.nav-section { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.nav-label {
+  padding: 16px 10px 6px;
+  font-size: 11px; font-weight: 600;
+  color: var(--fg-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  color: var(--fg-mute);
+  text-decoration: none;
+  font-size: 13px; font-weight: 500;
+  font-family: inherit;
+  background: none; border: none;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+.nav-item svg { width: 16px; height: 16px; opacity: 0.85; flex-shrink: 0; }
+.nav-item:hover { background: var(--bg-elevated); color: var(--fg); }
+.nav-item.is-active { background: var(--accent-tint); color: var(--accent-hi); }
+.nav-item.is-active svg { color: var(--accent); opacity: 1; }
+.nav-item .pill {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--fg-mute);
+}
+.nav-item.is-active .pill { background: var(--accent-line); color: var(--accent-hi); }
+
+.aside-footer {
+  margin-top: auto;
+  border-top: 1px solid var(--border-faint);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.server-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+}
+.server-card-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 4px;
+}
+.server-card-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 2px;
+}
+.server-card-meta b { color: var(--fg-soft); font-weight: 500; }
+
+.pulse-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; flex-shrink: 0; }
+.pulse-dot::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; background: var(--ok); opacity: 0.25; animation: pulse 2s infinite; }
+@keyframes pulse { 0% { transform: scale(1); opacity: 0.3; } 100% { transform: scale(2); opacity: 0; } }
+
+/* ============== MAIN ============== */
+.main { display: flex; flex-direction: column; min-width: 0; }
+
+.top {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky; top: 0; z-index: 5;
+}
+.page-title { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; display: flex; align-items: baseline; gap: 10px; }
+.page-title-count {
+  font-family: var(--font-mono);
+  font-size: 12px; font-weight: 500;
+  color: var(--fg-mute);
+  background: var(--bg-elevated);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.top-spacer { flex: 1; }
+
+.search { position: relative; width: 280px; max-width: 40vw; }
+.search input {
+  width: 100%;
+  padding: 7px 12px 7px 32px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font: inherit; font-size: 13px;
+}
+.search input::placeholder { color: var(--fg-faint); }
+.search input:focus { outline: none; border-color: var(--accent-line); background: var(--bg-surface); }
+.search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--fg-faint); }
+
+.scroll { padding: 24px; flex: 1; }
+
+/* ============== PAGES ============== */
 .page { display: none; }
-.page.active { display: block; padding: 24px 0; }
-.toggle { position: relative; display: inline-block; width: 44px; height: 24px; }
-.toggle input { opacity: 0; width: 0; height: 0; }
-.toggle span { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: var(--fg3); border-radius: 12px; transition: 0.2s; }
-.toggle input:checked + span { background: var(--accent); }
-.toggle span:before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
-.toggle input:checked + span:before { transform: translateX(20px); }
-.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
-.modal-overlay.active { display: flex; }
-.modal { background: var(--bg2); border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
-.modal h3 { margin-bottom: 16px; }
-.toast-container { position: fixed; top: 16px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
-.toast { padding: 12px 20px; border-radius: var(--radius); color: #fff; font-size: 14px; animation: slideIn 0.3s ease; max-width: 360px; }
-.toast.error { background: var(--red); }
-.toast.success { background: var(--green); }
-@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.status-dot.online { background: var(--green); animation: pulse 2s infinite; }
-.status-dot.offline { background: var(--fg3); }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.flex { display: flex; }
-.flex-between { display: flex; justify-content: space-between; align-items: center; }
-.gap-8 { gap: 8px; }
-.gap-12 { gap: 12px; }
-.gap-16 { gap: 16px; }
-.mt-16 { margin-top: 16px; }
-.mb-16 { margin-bottom: 16px; }
-.text-sm { font-size: 13px; }
-.text-muted { color: var(--fg2); }
-.text-accent { color: var(--accent); }
-.mono { font-family: var(--mono); font-size: 12px; }
-.code-block { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
-.sidebar { display: grid; grid-template-columns: 200px 1fr; gap: 24px; }
-.sidebar-nav a { display: block; padding: 8px 12px; border-radius: var(--radius); color: var(--fg2); text-decoration: none; margin-bottom: 4px; font-size: 14px; }
-.sidebar-nav a:hover, .sidebar-nav a.active { background: var(--bg3); color: var(--fg); }
-.search-bar { position: relative; flex: 1; max-width: 300px; }
-.search-bar input { padding-left: 32px; }
-.search-bar svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg3); }
-.otl-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin-top: 8px; font-size: 13px; }
-.otl-box .countdown { color: var(--accent); font-weight: 600; }
+.page.active { display: block; }
+.page-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg);
+  overflow: auto;
+}
+.page-overlay.active { display: block; }
+
+/* ============== BUTTONS ============== */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 12px;
+  border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-soft);
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  font-family: inherit;
+  text-decoration: none;
+}
+.btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn--ghost { background: var(--bg-elevated); border-color: var(--border); color: var(--fg-soft); }
+.btn--ghost:hover { background: var(--bg-surface); border-color: var(--border-strong); color: var(--fg); }
+.btn--quiet { color: var(--fg-mute); padding: 6px 8px; }
+.btn--quiet:hover { background: var(--bg-elevated); color: var(--fg); }
+.btn--primary { background: var(--accent); color: #15100a; font-weight: 600; }
+.btn--primary:hover { background: var(--accent-hi); color: #15100a; }
+.btn--outline { border-color: var(--border-strong); color: var(--fg-soft); }
+.btn--outline:hover { background: var(--bg-elevated); border-color: var(--accent-line); color: var(--fg); }
+.btn--danger { background: var(--danger-tint); color: var(--danger); border-color: rgba(248, 113, 113, 0.25); }
+.btn--danger:hover { background: rgba(248, 113, 113, 0.18); color: var(--danger); }
+.btn--sm { padding: 5px 9px; font-size: 12px; gap: 5px; }
+.btn--icon { padding: 6px; width: 28px; height: 28px; border-radius: var(--r-sm); }
+
+/* ============== INPUTS ============== */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 12px; font-weight: 500; color: var(--fg-soft); display: flex; align-items: center; gap: 6px; }
+.field-label .opt { color: var(--fg-faint); font-weight: 400; margin-left: 2px; }
+.field-help { font-size: 12px; color: var(--fg-faint); line-height: 1.5; }
+.field-help .mono { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); }
+.input, .textarea, .select, input[type="text"], input[type="password"], input[type="email"], input[type="number"], input[type="date"], textarea, select {
+  padding: 8px 11px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font: inherit; font-size: 13px;
+  width: 100%;
+  transition: border-color 0.12s, background 0.12s;
+  font-family: inherit;
+}
+input[type="checkbox"] { width: auto; }
+.input:focus, .textarea:focus, .select:focus, input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent-line); background: var(--bg-surface); }
+.input--mono, .mono-input { font-family: var(--font-mono); font-size: 12px; }
+textarea { font-family: var(--font-mono); font-size: 12px; resize: vertical; min-height: 60px; }
+input[disabled], select[disabled], textarea[disabled] { opacity: 0.6; cursor: not-allowed; }
+.input-wrap { position: relative; }
+.input-suffix { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-family: var(--font-mono); font-size: 11px; color: var(--fg-faint); pointer-events: none; }
+.input-icon { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; display: grid; place-items: center; color: var(--fg-faint); border-radius: 4px; background: none; border: none; cursor: pointer; }
+.input-icon:hover { background: var(--bg-elevated); color: var(--fg); }
+
+label { color: var(--fg-soft); }
+.form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.form-group > label:not(.toggle):not(.checkbox) { font-size: 12px; font-weight: 500; color: var(--fg-soft); display: inline-flex; align-items: center; gap: 4px; }
+
+/* ============== TOGGLE ============== */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px; height: 18px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+.toggle span, .toggle-track {
+  position: absolute; inset: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: 0.18s;
+  cursor: pointer;
+  display: block;
+}
+.toggle span::before, .toggle-track::before {
+  content: '';
+  position: absolute;
+  width: 12px; height: 12px;
+  top: 50%; left: 2px;
+  transform: translateY(-50%);
+  background: var(--fg-mute);
+  border-radius: 50%;
+  transition: 0.18s;
+}
+.toggle input:checked + span,
+.toggle input:checked + .toggle-track,
+.toggle.is-on .toggle-track,
+.toggle.is-on > span {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.toggle input:checked + span::before,
+.toggle input:checked + .toggle-track::before,
+.toggle.is-on .toggle-track::before,
+.toggle.is-on > span::before {
+  background: #15100a;
+  left: 16px;
+}
+.toggle--lg { width: 40px; height: 22px; }
+.toggle--lg span::before, .toggle--lg .toggle-track::before { width: 16px; height: 16px; }
+.toggle--lg input:checked + span::before,
+.toggle--lg.is-on .toggle-track::before,
+.toggle--lg.is-on > span::before { left: 20px; }
+
+/* ============== TIP CHIPS (existing tooltip system, restyled) ============== */
+.tip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 9px; font-weight: 700;
+  cursor: help;
+  margin-left: 4px;
+  position: relative;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: background 0.12s;
+}
+.tip:hover { background: var(--accent); color: #15100a; }
+.tip:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px); left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--fg-soft);
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font-size: 11.5px; font-weight: 400;
+  white-space: normal;
+  max-width: 280px;
+  width: max-content;
+  z-index: 500;
+  pointer-events: none;
+  text-align: left;
+  line-height: 1.5;
+  box-shadow: var(--shadow-md);
+}
+.tip:hover::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 4px); left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: var(--border-strong);
+  z-index: 500;
+  pointer-events: none;
+}
+
+/* ============== STATUS DOT ============== */
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot--on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); }
+.dot--off { background: var(--fg-dim); }
+.status-dot.online { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); animation: none; }
+.status-dot.offline { background: var(--fg-dim); }
+
+/* ============== TAGS ============== */
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.tag--neutral { background: var(--bg-elevated); color: var(--fg-mute); border: 1px solid var(--border); }
+.tag--ok { background: var(--ok-tint); color: var(--ok); }
+.tag--warn { background: var(--warn-tint); color: var(--warn); }
+.tag--accent { background: var(--accent-tint); color: var(--accent-hi); }
+.tag--danger { background: var(--danger-tint); color: var(--danger); }
+
+/* ============== CARDS ============== */
+.card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+.card-head {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border-faint);
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+}
+.card-title { font-size: 14px; font-weight: 600; }
+.card-sub { font-size: 12px; color: var(--fg-mute); margin-top: 2px; }
+.card-body { padding: 18px; }
+.card-foot { padding: 12px 18px; border-top: 1px solid var(--border-faint); display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ============== STATS STRIP ============== */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }
+.stat { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 13px 16px; }
+.stat-label {
+  font-size: 11px; color: var(--fg-faint);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  font-weight: 600; margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.stat-label svg { width: 12px; height: 12px; }
+.stat-value { font-family: var(--font-mono); font-size: 22px; font-weight: 500; letter-spacing: -0.01em; color: var(--fg); }
+.stat-value .unit { font-size: 13px; color: var(--fg-mute); margin-left: 2px; }
+.stat-sub { font-size: 11px; color: var(--fg-mute); margin-top: 4px; font-family: var(--font-mono); }
+.stat-sub b { color: var(--ok); font-weight: 500; }
+.stat-sub .down { color: var(--fg-soft); }
+
+/* ============== PEER TABLE ============== */
+.tbl { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.tbl-head, .tbl-row { display: grid; grid-template-columns: 24px 1.6fr 1.4fr 0.9fr 1.3fr 0.9fr 120px; align-items: center; padding: 11px 18px; }
+.tbl-head { border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.tbl-row { padding: 14px 18px; border-bottom: 1px solid var(--border-faint); transition: background 0.1s; }
+.tbl-row:last-child { border-bottom: none; }
+.tbl-row:hover { background: var(--bg-row-hover); }
+.tbl-row.is-disabled { opacity: 0.55; }
+
+.peer-name { display: flex; flex-direction: column; min-width: 0; }
+.peer-name b { font-size: 13px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.peer-name b:hover { color: var(--accent); }
+.peer-name span { font-size: 11px; color: var(--fg-faint); font-family: var(--font-mono); margin-top: 1px; }
+.peer-addr { font-family: var(--font-mono); font-size: 12px; color: var(--fg-soft); display: flex; flex-direction: column; gap: 2px; }
+.peer-addr small { font-size: 10.5px; color: var(--fg-faint); }
+.peer-seen { font-size: 12px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+.peer-seen.is-fresh { color: var(--ok); }
+.peer-tx { display: flex; align-items: center; gap: 10px; }
+.peer-rate { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-mute); display: flex; flex-direction: column; gap: 1px; }
+.peer-rate .down { color: var(--fg-soft); }
+.peer-rate .up { color: var(--fg-mute); }
+.peer-rate .arrow { color: var(--fg-faint); margin-right: 2px; }
+.peer-spark { width: 60px; height: 22px; flex-shrink: 0; }
+.peer-expiry { font-size: 12px; color: var(--fg-mute); font-family: var(--font-mono); }
+.peer-expiry.is-soon { color: var(--warn); }
+.peer-actions { display: flex; gap: 2px; justify-content: flex-end; align-items: center; }
+
+.otl-bar {
+  grid-column: 1 / -1;
+  margin: 8px -2px -4px;
+  padding: 9px 12px;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
+  display: flex; align-items: center; gap: 12px;
+  font-size: 12px;
+}
+.otl-bar svg { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
+.otl-link { font-family: var(--font-mono); font-size: 11.5px; color: var(--accent-hi); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.otl-countdown { font-family: var(--font-mono); font-size: 12px; color: var(--accent); font-weight: 600; }
+
+.empty {
+  text-align: center;
+  padding: 56px 24px;
+  color: var(--fg-mute);
+  background: var(--bg-surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+}
+.empty h3 { color: var(--fg-soft); margin-bottom: 6px; font-weight: 600; }
+.loading { text-align: center; padding: 40px; color: var(--fg-mute); font-family: var(--font-mono); font-size: 12px; }
+
+/* ============== EDIT PAGE ============== */
+.crumb { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-mute); font-family: var(--font-mono); margin-bottom: 6px; }
+.crumb a { color: var(--fg-mute); text-decoration: none; cursor: pointer; }
+.crumb a:hover { color: var(--fg-soft); }
+.crumb svg { width: 11px; height: 11px; color: var(--fg-faint); }
+.crumb b { color: var(--fg); font-weight: 500; }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.split-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.row { display: flex; gap: 12px; align-items: flex-end; }
+
+.section-rule {
+  display: flex; align-items: center; gap: 12px;
+  margin: 22px 0 12px;
+  font-size: 11px; font-weight: 600;
+  color: var(--fg-faint);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.section-rule::after { content: ''; flex: 1; height: 1px; background: var(--border-faint); }
+
+.key-block {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 9px 12px;
+  display: flex; align-items: center; gap: 10px;
+}
+.key-block code {
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--fg-soft);
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.key-block .key-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.key-block .btn--icon { width: 24px; height: 24px; }
+
+.code-block {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 14px 16px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.7;
+  color: var(--fg-soft);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 60vh;
+}
+
+.kvl { display: grid; grid-template-columns: 180px 1fr; row-gap: 14px; column-gap: 18px; align-items: start; }
+.kvl dt { font-size: 12px; color: var(--fg-mute); font-weight: 500; padding-top: 8px; }
+.kvl dd { display: flex; flex-direction: column; gap: 4px; }
+.kvl dd .help { font-size: 11.5px; color: var(--fg-faint); margin-top: 1px; }
+
+.danger-zone {
+  border: 1px solid rgba(248, 113, 113, 0.20);
+  border-radius: var(--r-md);
+  padding: 16px 18px;
+  background: rgba(248, 113, 113, 0.04);
+  display: flex; align-items: center; gap: 16px;
+}
+.danger-zone-text { flex: 1; }
+.danger-zone b { font-size: 13px; color: var(--danger); font-weight: 600; }
+.danger-zone span { font-size: 12px; color: var(--fg-mute); display: block; margin-top: 2px; }
+
+/* ============== PAGE HEAD ============== */
+.page-head {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 4px;
+}
+.page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.page-head-spacer { flex: 1; }
+
+/* ============== ADMIN ============== */
+.admin-shell { display: grid; grid-template-columns: 200px 1fr; gap: 28px; margin-top: 22px; }
+.admin-nav {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px 8px 4px 0;
+  border-right: 1px solid var(--border-faint);
+}
+.admin-nav a, .admin-nav button {
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500;
+  color: var(--fg-mute);
+  text-decoration: none;
+  display: flex; align-items: center; justify-content: space-between;
+  background: none; border: none;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.admin-nav a:hover, .admin-nav button:hover { background: var(--bg-elevated); color: var(--fg); }
+.admin-nav a.active, .admin-nav button.active { background: var(--accent-tint); color: var(--accent-hi); }
+.admin-nav .group-label { padding: 12px 12px 6px; font-size: 10.5px; font-weight: 600; color: var(--fg-faint); letter-spacing: 0.08em; text-transform: uppercase; }
+.admin-content { min-width: 0; }
+
+/* ============== AUTH SHELL (login + setup) ============== */
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+}
+.auth-side {
+  background:
+    radial-gradient(1200px 600px at 90% 100%, rgba(251, 178, 106, 0.08), transparent 60%),
+    linear-gradient(180deg, var(--bg-surface) 0%, var(--bg) 100%);
+  border-right: 1px solid var(--border);
+  padding: 36px 40px;
+  display: flex; flex-direction: column;
+  position: relative; overflow: hidden;
+}
+.auth-side-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(var(--border-faint) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-faint) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.4;
+  pointer-events: none;
+  mask-image: radial-gradient(800px 600px at 30% 50%, #000, transparent 80%);
+  -webkit-mask-image: radial-gradient(800px 600px at 30% 50%, #000, transparent 80%);
+}
+.auth-side-mark { display: flex; align-items: center; gap: 10px; position: relative; }
+.auth-side-mark .brand-mark { width: 32px; height: 32px; }
+.auth-side-mark .brand-name { font-size: 15px; }
+.auth-side-spacer { flex: 1; }
+.auth-side-quote { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.5; color: var(--fg-soft); margin-bottom: 16px; position: relative; }
+.auth-side-quote em { color: var(--accent); font-style: normal; }
+.auth-side-attr { font-size: 12px; color: var(--fg-faint); font-family: var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; position: relative; }
+
+.auth-main { padding: 44px 56px; display: flex; flex-direction: column; justify-content: center; }
+.auth-card { max-width: 420px; width: 100%; margin: 0 auto; }
+.auth-h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; }
+.auth-sub { font-size: 13px; color: var(--fg-mute); margin-bottom: 24px; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+
+.notice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r-sm); font-size: 12px; line-height: 1.5; }
+.notice svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; }
+.notice--warn { background: var(--warn-tint); color: #facc7a; border: 1px solid rgba(251, 191, 36, 0.20); }
+.notice--warn svg { color: var(--warn); }
+.notice--info { background: rgba(122, 162, 255, 0.08); color: #aac3ff; border: 1px solid rgba(122, 162, 255, 0.20); }
+.notice--info svg { color: var(--info); }
+
+.checkbox { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg-soft); cursor: pointer; }
+.checkbox-box { width: 16px; height: 16px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-input); display: grid; place-items: center; flex-shrink: 0; }
+.checkbox input { position: absolute; opacity: 0; pointer-events: none; }
+.checkbox input:checked ~ .checkbox-box { background: var(--accent); border-color: var(--accent); }
+.checkbox-box svg { display: none; width: 10px; height: 10px; color: #15100a; }
+.checkbox input:checked ~ .checkbox-box svg { display: block; }
+
+/* ============== STEPPER ============== */
+.stepper { display: flex; gap: 8px; margin-bottom: 24px; }
 .steps { display: flex; gap: 8px; margin-bottom: 24px; }
-.step { flex: 1; height: 4px; background: var(--border); border-radius: 2px; }
-.step.done { background: var(--accent); }
-.step.active { background: var(--accent2); }
-.loading { text-align: center; padding: 40px; color: var(--fg2); }
-.empty { text-align: center; padding: 40px; color: var(--fg2); }
-.empty h3 { color: var(--fg); margin-bottom: 8px; }
-svg.icon { width: 18px; height: 18px; }
-.chart-svg { width: 100%; height: 40px; }
-label { display: inline-flex; align-items: center; gap: 2px; }
-.tip { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); color: #000; font-size: 9px; font-weight: 800; cursor: help; margin-left: 2px; position: relative; flex-shrink: 0; line-height: 1; opacity: 0.8; transition: opacity 0.15s; }
-.tip:hover { opacity: 1; }
-.tip:hover::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 400; white-space: normal; max-width: 280px; width: max-content; z-index: 500; pointer-events: none; text-align: left; line-height: 1.4; }
-.tip:hover::before { content: ''; position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); border: 4px solid transparent; border-top-color: var(--fg); z-index: 500; pointer-events: none; }
+.steps .step, .stepper .step { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.steps .step { display: block; height: 3px; background: var(--border); border-radius: 2px; }
+.steps .step.done, .steps .step.active { background: var(--accent); }
+.stepper .step { gap: 6px; }
+.step-bar { height: 3px; background: var(--border); border-radius: 2px; }
+.step.is-done .step-bar, .step.is-active .step-bar { background: var(--accent); }
+.step-label { font-size: 11px; color: var(--fg-faint); font-weight: 500; font-family: var(--font-mono); letter-spacing: 0.04em; text-transform: uppercase; }
+.step.is-active .step-label { color: var(--accent); }
+.step.is-done .step-label { color: var(--fg-mute); }
+
+/* ============== AVATAR ============== */
+.avatar { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-lo)); display: grid; place-items: center; color: #15100a; font-weight: 600; font-size: 16px; flex-shrink: 0; }
+
+/* ============== MODALS ============== */
+.modal-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  align-items: center; justify-content: center;
+  padding: 24px;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  padding: 22px;
+  max-width: 480px; width: 100%;
+  max-height: 80vh; overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+.modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
+.modal--lg { max-width: 640px; }
+
+/* ============== TOASTS ============== */
+.toast-container {
+  position: fixed; top: 20px; right: 20px; z-index: 300;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  padding: 11px 16px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  max-width: 360px;
+  box-shadow: var(--shadow-md);
+  animation: slideIn 0.25s ease;
+  border: 1px solid var(--border-strong);
+}
+.toast.error { background: var(--danger-tint); color: var(--danger); border-color: rgba(248, 113, 113, 0.3); }
+.toast.success { background: var(--ok-tint); color: var(--ok); border-color: rgba(74, 222, 128, 0.3); }
+@keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* ============== STICKY SAVE BAR ============== */
+.save-bar {
+  position: sticky; bottom: 0;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-strong);
+  padding: 12px 24px;
+  display: flex; align-items: center; gap: 12px;
+  margin: 18px -24px -24px;
+}
+.save-bar .changed { font-size: 12px; color: var(--fg-mute); font-family: var(--font-mono); display: flex; align-items: center; gap: 6px; }
+.save-bar .changed::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.save-bar-spacer { flex: 1; }
+
+/* ============== UTILITIES ============== */
+.mut { color: var(--fg-mute); }
+.ok-text { color: var(--ok); }
+.mono { font-family: var(--font-mono); }
+.sub { font-size: 11.5px; color: var(--fg-mute); }
+.text-muted { color: var(--fg-mute); }
+
+/* legacy classes still referenced in some places — map to new design */
+.btn-primary { background: var(--accent); color: #15100a; font-weight: 600; padding: 7px 12px; border-radius: var(--r-sm); border: 1px solid transparent; font-size: 13px; cursor: pointer; }
+.btn-secondary { background: var(--bg-elevated); color: var(--fg-soft); border: 1px solid var(--border); padding: 7px 12px; border-radius: var(--r-sm); font-size: 13px; cursor: pointer; }
+.btn-secondary:hover { border-color: var(--border-strong); color: var(--fg); background: var(--bg-surface); }
+.btn-danger { background: var(--danger-tint); color: var(--danger); border: 1px solid rgba(248, 113, 113, 0.25); padding: 7px 12px; border-radius: var(--r-sm); font-size: 13px; cursor: pointer; }
+.btn-sm { padding: 5px 9px; font-size: 12px; }
+
+/* ============== RESPONSIVE ============== */
+@media (max-width: 880px) {
+  .shell { grid-template-columns: 1fr; }
+  .aside { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 14px; }
+  .aside-footer { display: none; }
+  .auth-shell { grid-template-columns: 1fr; }
+  .auth-side { display: none; }
+  .auth-main { padding: 32px 20px; }
+  .stats { grid-template-columns: 1fr; }
+  .split, .split-3 { grid-template-columns: 1fr; }
+  .admin-shell { grid-template-columns: 1fr; }
+  .admin-nav { border-right: none; border-bottom: 1px solid var(--border-faint); flex-direction: row; overflow-x: auto; padding: 0 0 8px; }
+  .tbl-head { display: none; }
+  .tbl-row { grid-template-columns: 1fr; gap: 8px; }
+  .scroll { padding: 16px; }
+}
 </style>
 </head>
 <body>
 
-<header id="header" style="display:none">
-  <div class="container">
-    <a href="#/" class="logo" onclick="navigate('/')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
-      AmneziaWG Easy
+<!-- =========================================================== -->
+<!-- ICONS                                                       -->
+<!-- =========================================================== -->
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 7h.01M6 17.5h.01"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M5 16v-4h14v4M12 8v4"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+    <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v3M14 21h3M21 17v4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  </defs>
+</svg>
+
+<!-- =========================================================== -->
+<!-- APP SHELL (sidebar + main pages)                            -->
+<!-- =========================================================== -->
+<div class="shell" id="app-shell">
+  <aside class="aside">
+    <a class="brand-row" href="#/" onclick="navigate('/')">
+      <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+      <div class="brand-name">awg-easy<small>VPN manager</small></div>
     </a>
-    <div class="nav" id="nav-links"></div>
-  </div>
-</header>
-
-<div class="container">
-  <!-- Login -->
-  <div id="page-login" class="page">
-    <div class="panel" style="max-width:400px;margin:80px auto">
-      <h2 style="text-align:center;margin-bottom:8px">Sign In</h2>
-      <p style="text-align:center;color:var(--fg2);margin-bottom:24px">AmneziaWG VPN Manager</p>
-      <div id="insecure-warning" style="display:none;background:var(--yellow);color:#000;padding:8px 12px;border-radius:var(--radius);margin-bottom:16px;font-size:13px">
-        Insecure connection. Use HTTPS for production.
-      </div>
-      <form id="login-form" onsubmit="doLogin(event)">
-        <div class="form-group"><label>Username</label><input type="text" id="login-user" required autofocus></div>
-        <div class="form-group"><label>Password</label><input type="password" id="login-pass" required></div>
-        <div id="totp-group" class="form-group" style="display:none"><label>TOTP Code</label><input type="text" id="login-totp" maxlength="6" pattern="[0-9]{6}"></div>
-        <div class="form-group flex gap-8" style="align-items:center"><input type="checkbox" id="login-remember" style="width:auto"><label style="margin:0">Remember me</label></div>
-        <button type="submit" class="btn btn-primary" style="width:100%">Sign In</button>
-      </form>
+    <div class="nav-section" id="nav-links">
+      <div class="nav-label">Workspace</div>
+      <button class="nav-item" data-route="/" onclick="navigate('/')">
+        <svg><use href="#i-users"/></svg> Clients <span class="pill" id="side-peer-count">—</span>
+      </button>
+      <button class="nav-item" data-route="/me" onclick="navigate('/me')">
+        <svg><use href="#i-user"/></svg> Account
+      </button>
+      <div class="nav-label" id="side-admin-label" style="display:none">Server</div>
+      <button class="nav-item" data-route="/admin" id="side-admin-link" style="display:none" onclick="navigate('/admin')">
+        <svg><use href="#i-settings"/></svg> Admin
+      </button>
     </div>
-  </div>
-
-  <!-- Setup -->
-  <div id="page-setup" class="page">
-    <div class="panel" style="max-width:500px;margin:60px auto">
-      <h2>Setup Wizard</h2>
-      <div class="steps" id="setup-steps"><div class="step active"></div><div class="step"></div><div class="step"></div><div class="step"></div></div>
-      <div id="setup-step1">
-        <p class="mb-16">Welcome! Let's configure your AmneziaWG VPN.</p>
-        <button class="btn btn-primary" onclick="setupGo(2)">Get Started</button>
+    <div class="aside-footer">
+      <div class="server-card">
+        <div class="server-card-head"><span class="pulse-dot"></span> wg0 · <span id="side-status">online</span></div>
+        <div class="server-card-meta">
+          <span>peers</span> <b id="side-peer-active">— / —</b>
+          <span>version</span> <b id="side-version">—</b>
+        </div>
       </div>
-      <div id="setup-step2" style="display:none">
-        <form onsubmit="setupCreateUser(event)">
-          <div class="form-group"><label title="Admin account username for logging into the web UI">Username</label><input type="text" id="setup-user" required></div>
-          <div class="form-group"><label title="Password for the admin account. Must be at least 6 characters">Password</label><input type="password" id="setup-pass" required></div>
-          <div class="form-group"><label title="Re-enter the password to confirm">Confirm Password</label><input type="password" id="setup-pass2" required></div>
-          <div class="flex gap-8" style="justify-content:space-between">
-            <button type="button" class="btn btn-secondary" onclick="setupGo(1)">← Back</button>
-            <button type="submit" class="btn btn-primary">Create Account</button>
+      <button class="nav-item" onclick="doLogout()" style="margin-top:6px">
+        <svg><use href="#i-logout"/></svg> Sign out
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- ========== CLIENTS ========== -->
+    <div id="page-clients" class="page">
+      <div class="top">
+        <h1 class="page-title">Clients <span class="page-title-count" id="clients-count">—</span></h1>
+        <div class="top-spacer"></div>
+        <div class="search">
+          <svg><use href="#i-search"/></svg>
+          <input type="text" id="client-search" placeholder="Search by name or address…" autocomplete="off">
+        </div>
+        <button class="btn btn--ghost btn--icon" title="Refresh" onclick="refreshClients()"><svg><use href="#i-refresh"/></svg></button>
+        <button class="btn btn--primary" onclick="showCreateModal()"><svg><use href="#i-plus"/></svg> New peer</button>
+      </div>
+      <div class="scroll">
+        <div class="stats" id="client-stats"></div>
+        <div id="client-list"></div>
+      </div>
+    </div>
+
+    <!-- ========== CLIENT EDIT ========== -->
+    <div id="page-client-edit" class="page">
+      <div class="top">
+        <button class="btn btn--quiet btn--icon" onclick="navigate('/')" title="Back"><svg><use href="#i-chevron-left"/></svg></button>
+        <h1 class="page-title" id="edit-title" style="font-size:16px">Edit peer</h1>
+        <div class="top-spacer"></div>
+        <span class="sub" id="edit-status"></span>
+      </div>
+      <div class="scroll">
+        <div class="crumb"><a onclick="navigate('/')">Clients</a><svg><use href="#i-chevron-right"/></svg><b id="edit-crumb-name">—</b></div>
+        <div id="edit-form"></div>
+      </div>
+    </div>
+
+    <!-- ========== ACCOUNT ========== -->
+    <div id="page-me" class="page">
+      <div class="top">
+        <h1 class="page-title">Account</h1>
+        <div class="top-spacer"></div>
+        <span class="sub">signed in as <b style="color:var(--fg-soft);font-weight:500" id="me-username">—</b></span>
+      </div>
+      <div class="scroll">
+        <div class="split">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">Profile</div>
+                <div class="card-sub">How you appear in the audit log.</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <form onsubmit="saveProfile(event)">
+                <div class="stack">
+                  <div class="field">
+                    <label class="field-label" for="me-name">Display name</label>
+                    <input type="text" id="me-name" autocomplete="name">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="me-email">Email</label>
+                    <input type="email" id="me-email" autocomplete="email">
+                    <p class="field-help">Used for password resets and recovery.</p>
+                  </div>
+                </div>
+                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+                  <button type="submit" class="btn btn--primary">Save profile</button>
+                </div>
+              </form>
+            </div>
           </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">Password</div>
+                <div class="card-sub">Change your sign-in password.</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <form onsubmit="changePassword(event)">
+                <div class="stack">
+                  <div class="field">
+                    <label class="field-label" for="pw-current">Current password</label>
+                    <input type="password" id="pw-current" autocomplete="current-password" required>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="pw-new">New password</label>
+                    <input type="password" id="pw-new" autocomplete="new-password" required>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="pw-confirm">Confirm new password</label>
+                    <input type="password" id="pw-confirm" autocomplete="new-password" required>
+                  </div>
+                </div>
+                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+                  <button type="submit" class="btn btn--primary">Update password</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== ADMIN ========== -->
+    <div id="page-admin" class="page">
+      <div class="top">
+        <h1 class="page-title">Admin</h1>
+        <div class="top-spacer"></div>
+        <button class="btn btn--ghost btn--sm" onclick="restartWG()" title="Restart wg0 interface"><svg><use href="#i-refresh"/></svg> Restart wg0</button>
+      </div>
+      <div class="scroll" style="padding-top:16px">
+        <div class="admin-shell">
+          <nav class="admin-nav sidebar-nav">
+            <div class="group-label">Server</div>
+            <a href="#/admin" data-tab="general" onclick="showAdminTab('general',event)" class="active">General</a>
+            <a href="#/admin" data-tab="config" onclick="showAdminTab('config',event)">Defaults</a>
+            <a href="#/admin" data-tab="interface" onclick="showAdminTab('interface',event)">Interface</a>
+            <a href="#/admin" data-tab="hooks" onclick="showAdminTab('hooks',event)">Hooks</a>
+          </nav>
+          <div class="admin-content" id="admin-content"></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- =========================================================== -->
+<!-- LOGIN (page-overlay)                                        -->
+<!-- =========================================================== -->
+<div id="page-login" class="page page-overlay">
+  <div class="auth-shell">
+    <aside class="auth-side">
+      <div class="auth-side-grid"></div>
+      <div class="auth-side-mark">
+        <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+        <div class="brand-name">awg-easy<small>AmneziaWG manager</small></div>
+      </div>
+      <div class="auth-side-spacer"></div>
+      <p class="auth-side-quote">An ordinary WireGuard endpoint. Until it isn't — <em>obfuscated handshakes</em>, junk packets, four magic header values rolled per-server. The kind of thing nobody finds twice.</p>
+      <p class="auth-side-attr">— The point of AmneziaWG</p>
+    </aside>
+    <div class="auth-main">
+      <div class="auth-card">
+        <h1 class="auth-h1">Welcome back</h1>
+        <p class="auth-sub">Sign in to manage your VPN.</p>
+        <form id="login-form" class="auth-form" onsubmit="doLogin(event)">
+          <div id="insecure-warning" class="notice notice--warn" style="display:none">
+            <svg><use href="#i-alert"/></svg>
+            <div><b>Insecure connection.</b> You're connected over plain HTTP. Configure TLS or a reverse proxy before exposing this UI.</div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="login-user">Username</label>
+            <input type="text" id="login-user" autocomplete="username" required autofocus>
+          </div>
+          <div class="field">
+            <label class="field-label" for="login-pass">Password</label>
+            <input type="password" id="login-pass" autocomplete="current-password" required>
+          </div>
+          <div id="totp-group" class="field" style="display:none">
+            <label class="field-label" for="login-totp">TOTP code</label>
+            <input type="text" id="login-totp" class="input--mono" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" style="letter-spacing:0.4em;text-align:center;font-size:18px;padding:10px 11px">
+            <p class="field-help">From Authy, 1Password, Aegis, or your authenticator of choice.</p>
+          </div>
+          <label class="checkbox" style="margin-top:2px">
+            <input type="checkbox" id="login-remember">
+            <span class="checkbox-box"><svg><use href="#i-check"/></svg></span>
+            Remember this browser for 30 days
+          </label>
+          <button type="submit" class="btn btn--primary" style="height:38px;font-size:14px;margin-top:4px">Sign in <svg><use href="#i-arrow-right"/></svg></button>
         </form>
       </div>
-      <div id="setup-step4" style="display:none">
-        <form onsubmit="setupFinish(event)">
-          <div class="form-group"><label title="Public IP address or hostname that VPN clients will connect to">Server Hostname/IP</label><input type="text" id="setup-host" required placeholder="your-server.com"></div>
-          <div class="form-group"><label title="UDP port for AmneziaWG connections. Default: 51820">AmneziaWG Port</label><input type="number" id="setup-port" value="51820" required></div>
-          <div class="flex gap-8" style="justify-content:space-between">
-            <button type="button" class="btn btn-secondary" onclick="setupGo(2)">← Back</button>
-            <button type="submit" class="btn btn-primary">Complete Setup</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <!-- Client List -->
-  <div id="page-clients" class="page">
-    <div class="flex-between mb-16">
-      <h2>Clients</h2>
-      <div class="flex gap-8">
-        <div class="search-bar"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><input type="text" id="client-search" placeholder="Search clients..." oninput="renderClients()"></div>
-        <button class="btn btn-primary" onclick="showCreateModal()">+ New Client</button>
-      </div>
-    </div>
-    <div id="client-list"></div>
-  </div>
-
-  <!-- Client Edit -->
-  <div id="page-client-edit" class="page">
-    <div class="flex gap-8 mb-16" style="align-items:center">
-      <a href="#/" class="btn btn-secondary btn-sm" onclick="navigate('/')">← Back</a>
-      <h2 id="edit-title">Edit Client</h2>
-    </div>
-    <div class="panel" id="edit-form"></div>
-  </div>
-
-  <!-- Account -->
-  <div id="page-me" class="page">
-    <h2 class="mb-16">Account</h2>
-    <div class="panel">
-      <h3 class="mb-16">Profile</h3>
-      <form onsubmit="saveProfile(event)">
-        <div class="form-group"><label>Display Name</label><input type="text" id="me-name"></div>
-        <div class="form-group"><label>Email</label><input type="email" id="me-email"></div>
-        <button class="btn btn-primary">Save</button>
-      </form>
-    </div>
-    <div class="panel mt-16">
-      <h3 class="mb-16">Change Password</h3>
-      <form onsubmit="changePassword(event)">
-        <div class="form-group"><label>Current Password</label><input type="password" id="pw-current" required></div>
-        <div class="form-group"><label>New Password</label><input type="password" id="pw-new" required></div>
-        <div class="form-group"><label>Confirm Password</label><input type="password" id="pw-confirm" required></div>
-        <button class="btn btn-primary">Update Password</button>
-      </form>
-    </div>
-  </div>
-
-  <!-- Admin -->
-  <div id="page-admin" class="page">
-    <h2 class="mb-16">Admin Panel</h2>
-    <div class="sidebar">
-      <div class="sidebar-nav">
-        <a href="#/admin" class="active" onclick="showAdminTab('general',event)">General</a>
-        <a href="#/admin" onclick="showAdminTab('config',event)">Config</a>
-        <a href="#/admin" onclick="showAdminTab('interface',event)">Interface</a>
-        <a href="#/admin" onclick="showAdminTab('hooks',event)">Hooks</a>
-      </div>
-      <div id="admin-content"></div>
     </div>
   </div>
 </div>
 
-<!-- Modals -->
+<!-- =========================================================== -->
+<!-- SETUP (page-overlay)                                        -->
+<!-- =========================================================== -->
+<div id="page-setup" class="page page-overlay">
+  <div class="auth-shell">
+    <aside class="auth-side">
+      <div class="auth-side-grid"></div>
+      <div class="auth-side-mark">
+        <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+        <div class="brand-name">awg-easy<small>first-time setup</small></div>
+      </div>
+      <div class="auth-side-spacer"></div>
+      <p class="auth-side-quote">Three minutes from clean install to your first peer connecting. <em>No configs to memorize</em>; only the values your VPN can't guess.</p>
+      <p class="auth-side-attr">— Setup checklist</p>
+    </aside>
+    <div class="auth-main">
+      <div class="auth-card">
+        <div class="stepper" id="setup-steps">
+          <div class="step active"><div class="step-bar"></div><div class="step-label">01 Welcome</div></div>
+          <div class="step"><div class="step-bar"></div><div class="step-label">02 Admin</div></div>
+          <div class="step"><div class="step-bar"></div><div class="step-label">03 Endpoint</div></div>
+        </div>
+        <div id="setup-step1">
+          <h1 class="auth-h1">Let's set up your VPN</h1>
+          <p class="auth-sub">An admin account, then a server endpoint. That's it.</p>
+          <button class="btn btn--primary" style="height:38px;font-size:14px" onclick="setupGo(2)">Get started <svg><use href="#i-arrow-right"/></svg></button>
+        </div>
+        <div id="setup-step2" style="display:none">
+          <h1 class="auth-h1">Create the admin account</h1>
+          <p class="auth-sub">You'll use this to sign in to the manager.</p>
+          <form class="auth-form" onsubmit="setupCreateUser(event)">
+            <div class="field">
+              <label class="field-label" for="setup-user" title="Admin account username for logging into the web UI">Username</label>
+              <input type="text" id="setup-user" autocomplete="username" required>
+            </div>
+            <div class="field">
+              <label class="field-label" for="setup-pass" title="Password for the admin account. Must be at least 6 characters">Password</label>
+              <input type="password" id="setup-pass" autocomplete="new-password" required>
+            </div>
+            <div class="field">
+              <label class="field-label" for="setup-pass2" title="Re-enter the password to confirm">Confirm password</label>
+              <input type="password" id="setup-pass2" autocomplete="new-password" required>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:6px">
+              <button type="button" class="btn btn--ghost" onclick="setupGo(1)">Back</button>
+              <div style="flex:1"></div>
+              <button type="submit" class="btn btn--primary">Continue <svg><use href="#i-arrow-right"/></svg></button>
+            </div>
+          </form>
+        </div>
+        <div id="setup-step4" style="display:none">
+          <h1 class="auth-h1">Server endpoint</h1>
+          <p class="auth-sub">Where will your peers connect? This goes into every client config.</p>
+          <form class="auth-form" onsubmit="setupFinish(event)">
+            <div class="field">
+              <label class="field-label" for="setup-host" title="Public IP address or hostname that VPN clients will connect to">Public hostname or IP</label>
+              <input type="text" id="setup-host" class="mono-input" placeholder="vpn.example.com" required>
+            </div>
+            <div class="field">
+              <label class="field-label" for="setup-port" title="UDP port for AmneziaWG connections. Default: 51820">UDP port</label>
+              <input type="number" id="setup-port" class="mono-input" value="51820" required>
+            </div>
+            <div class="notice notice--info">
+              <svg><use href="#i-info"/></svg>
+              <div>The UDP port needs to be open on your firewall. We'll set up <span class="mono">iptables</span> rules automatically.</div>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:6px">
+              <button type="button" class="btn btn--ghost" onclick="setupGo(2)">Back</button>
+              <div style="flex:1"></div>
+              <button type="submit" class="btn btn--primary">Complete setup <svg><use href="#i-arrow-right"/></svg></button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- =========================================================== -->
+<!-- MODALS                                                      -->
+<!-- =========================================================== -->
 <div class="modal-overlay" id="modal-create">
   <div class="modal">
-    <h3>New Client</h3>
+    <h3>New peer</h3>
     <form onsubmit="createClient(event)">
-      <div class="form-group"><label>Name</label><input type="text" id="create-name" required></div>
-      <div class="form-group"><label>Expire Date (optional)</label><input type="date" id="create-expires"></div>
-      <div class="flex gap-8" style="justify-content:flex-end">
-        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-create')">Cancel</button>
-        <button type="submit" class="btn btn-primary">Create</button>
+      <div class="stack">
+        <div class="field">
+          <label class="field-label" for="create-name">Name</label>
+          <input type="text" id="create-name" placeholder="e.g. macbook-air" required autofocus>
+        </div>
+        <div class="field">
+          <label class="field-label" for="create-expires">Expires <span class="opt">optional</span></label>
+          <input type="date" id="create-expires">
+          <p class="field-help">Leave empty for permanent access.</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+        <button type="button" class="btn btn--ghost" onclick="closeModal('modal-create')">Cancel</button>
+        <button type="submit" class="btn btn--primary">Create peer</button>
       </div>
     </form>
   </div>
 </div>
+
 <div class="modal-overlay" id="modal-qr">
   <div class="modal">
-    <h3>QR Code</h3>
-    <div id="qr-image" style="text-align:center"></div>
-    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
-      <button class="btn btn-secondary" onclick="copyQR()">Copy PNG</button>
-      <button class="btn btn-primary" onclick="downloadQR()">Download PNG</button>
+    <h3>Scan to import</h3>
+    <p class="sub" style="margin-bottom:12px">Open AmneziaWG on your device and scan this code.</p>
+    <div id="qr-image" style="text-align:center;padding:8px;background:#fff;border-radius:var(--r-sm)"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+      <button class="btn btn--ghost" onclick="copyQR()"><svg><use href="#i-copy"/></svg> Copy PNG</button>
+      <button class="btn btn--primary" onclick="downloadQR()"><svg><use href="#i-download"/></svg> Download SVG</button>
     </div>
   </div>
 </div>
+
 <div class="modal-overlay" id="modal-config">
-  <div class="modal" style="max-width:600px">
-    <h3>Configuration</h3>
+  <div class="modal modal--lg">
+    <h3>Peer configuration</h3>
     <div class="code-block" id="config-text"></div>
-    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
-      <button class="btn btn-primary" onclick="copyConfig()">Copy</button>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+      <button class="btn btn--ghost" onclick="closeModal('modal-config')">Close</button>
+      <button class="btn btn--primary" onclick="copyConfig()"><svg><use href="#i-copy"/></svg> Copy to clipboard</button>
     </div>
   </div>
 </div>
+
 <div class="modal-overlay" id="modal-delete">
   <div class="modal">
-    <h3>Delete Client</h3>
-    <p>Are you sure? This cannot be undone.</p>
-    <div class="flex gap-8 mt-16" style="justify-content:flex-end">
-      <button class="btn btn-secondary" onclick="closeModal('modal-delete')">Cancel</button>
-      <button class="btn btn-danger" id="delete-confirm-btn">Delete</button>
+    <h3>Delete peer</h3>
+    <p class="sub" style="margin-bottom:14px">This removes the peer from <span class="mono">wg0</span>, revokes its keys, and frees the address. Cannot be undone.</p>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn btn--ghost" onclick="closeModal('modal-delete')">Cancel</button>
+      <button class="btn btn--danger" id="delete-confirm-btn"><svg><use href="#i-trash"/></svg> Delete peer</button>
     </div>
   </div>
 </div>
