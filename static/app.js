@@ -840,6 +840,12 @@ async function saveProfile(e) {
   e.preventDefault();
   try {
     await POST('/api/me', { name: $('me-name').value, email: $('me-email').value || null });
+    // Reflect the new values in the cached USER object so the sidebar /
+    // header doesn't show stale name until next checkSession.
+    if (USER) {
+      USER.name = $('me-name').value;
+      USER.email = $('me-email').value || null;
+    }
     showToast('Profile updated', 'success');
   } catch(e) { showToast(e.message, 'error'); }
 }
@@ -1119,38 +1125,6 @@ async function showAdminTab(tab, e) {
             </div>
           </div>
 
-          <div class="card" style="margin-top:18px">
-            <div class="card-head">
-              <div>
-                <div class="card-title">Kernel module options</div>
-                <div class="card-sub">Only applied when the AmneziaWG kernel module is in use.</div>
-              </div>
-            </div>
-            <div class="card-body">
-              <div class="split-3">
-                <div class="field">
-                  <label class="field-label" for="adm-if-j1" title="Additional junk string 1. Kernel module only">J1</label>
-                  <input type="text" id="adm-if-j1" class="mono-input" value="${esc(iface.j1 || '')}">
-                </div>
-                <div class="field">
-                  <label class="field-label" for="adm-if-j2" title="Additional junk string 2. Kernel module only">J2</label>
-                  <input type="text" id="adm-if-j2" class="mono-input" value="${esc(iface.j2 || '')}">
-                </div>
-                <div class="field">
-                  <label class="field-label" for="adm-if-j3" title="Additional junk string 3. Kernel module only">J3</label>
-                  <input type="text" id="adm-if-j3" class="mono-input" value="${esc(iface.j3 || '')}">
-                </div>
-                <div class="field">
-                  <label class="field-label" for="adm-if-itime" title="Junk packet interval in seconds. 0 = disabled. Kernel module only">Itime</label>
-                  <div class="input-wrap">
-                    <input type="number" id="adm-if-itime" class="mono-input" value="${iface.itime || 0}" style="padding-right:64px">
-                    <span class="input-suffix">seconds</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div class="save-bar">
             <span class="changed">Changes need a restart</span>
             <div class="save-bar-spacer"></div>
@@ -1293,11 +1267,7 @@ async function saveAdminInterface(e) {
       i2: $('adm-if-i2').value,
       i3: $('adm-if-i3').value,
       i4: $('adm-if-i4').value,
-      i5: $('adm-if-i5').value,
-      j1: $('adm-if-j1').value,
-      j2: $('adm-if-j2').value,
-      j3: $('adm-if-j3').value,
-      itime: parseInt($('adm-if-itime').value) || 0
+      i5: $('adm-if-i5').value
     });
     showToast('Saved', 'success');
   } catch(e) { showToast(e.message, 'error'); }

@@ -84,7 +84,10 @@ pub struct LoginRequest {
     pub password: String,
     #[serde(default)]
     pub remember: bool,
-    #[serde(rename = "totpCode")]
+    // Accept both `totpCode` (legacy / Node.js upstream) and `totp` (the
+    // shorter form the redesigned UI sends). Ignoring this field meant
+    // every TOTP-protected account was unauthable from the browser.
+    #[serde(rename = "totpCode", alias = "totp", default)]
     pub totp_code: Option<String>,
 }
 
@@ -336,6 +339,11 @@ pub struct ChangePasswordRequest {
     pub current_password: String,
     #[serde(rename = "newPassword")]
     pub new_password: String,
+    /// Optional client-side double-check. When provided, must equal
+    /// `newPassword`; setup flow already validates this and the change-password
+    /// flow should be consistent.
+    #[serde(rename = "confirmPassword", default)]
+    pub confirm_password: Option<String>,
 }
 
 pub async fn change_password(
@@ -350,6 +358,17 @@ pub async fn change_password(
         .map_err(map_err)?;
     if !valid {
         return Err(api_err(StatusCode::UNAUTHORIZED, "Invalid current password"));
+    }
+
+    // If the caller sent confirmPassword, it must match. Defense in depth
+    // against a UI that forgets to validate before submit.
+    if let Some(ref confirm) = body.confirm_password {
+        if confirm != &body.new_password {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "New password and confirmation do not match",
+            ));
+        }
     }
 
     if body.new_password.len() < 6 {
