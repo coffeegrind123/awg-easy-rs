@@ -576,7 +576,12 @@ async function generateOTL(id) {
   try {
     await POST('/api/client/' + id + '/generateOneTimeLink');
     showToast('One-time link generated', 'success');
-    refreshClients();
+    // Reload whichever page is showing this peer so the new link surfaces.
+    if (window.location.hash.startsWith('#/clients/')) {
+      loadClientEdit(id);
+    } else {
+      refreshClients();
+    }
   } catch(e) { showToast(e.message, 'error'); }
 }
 
@@ -719,11 +724,20 @@ async function loadClientEdit(id) {
                 <dt>Total transfer</dt>
                 <dd><span class="mono">${totalTransfer}</span></dd>
               </dl>
+              ${c.oneTimeLink ? `
+              <div class="section-rule">Active one-time link</div>
+              <div class="otl-bar" style="margin:0">
+                <svg><use href="#i-link"/></svg>
+                <span class="otl-link">${esc(window.location.origin + '/cnf/' + c.oneTimeLink.oneTimeLink)}</span>
+                <span>expires in</span>
+                <span class="otl-countdown" id="edit-otl-${id}">—</span>
+                <button type="button" class="btn btn--quiet btn--sm" onclick="copyText('${escJs(window.location.origin + '/cnf/' + c.oneTimeLink.oneTimeLink)}')"><svg><use href="#i-copy"/></svg> copy</button>
+              </div>` : ''}
               <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
-                <button class="btn btn--ghost btn--sm" onclick="showQR(${id})"><svg><use href="#i-qr"/></svg> Show QR</button>
-                <button class="btn btn--ghost btn--sm" onclick="showConfig(${id})"><svg><use href="#i-eye"/></svg> View config</button>
-                <button class="btn btn--ghost btn--sm" onclick="downloadConfig(${id})"><svg><use href="#i-download"/></svg> Download .conf</button>
-                <button class="btn btn--ghost btn--sm" onclick="generateOTL(${id})"><svg><use href="#i-link"/></svg> One-time link</button>
+                <button type="button" class="btn btn--ghost btn--sm" onclick="showQR(${id})"><svg><use href="#i-qr"/></svg> Show QR</button>
+                <button type="button" class="btn btn--ghost btn--sm" onclick="showConfig(${id})"><svg><use href="#i-eye"/></svg> View config</button>
+                <button type="button" class="btn btn--ghost btn--sm" onclick="downloadConfig(${id})"><svg><use href="#i-download"/></svg> Download .conf</button>
+                <button type="button" class="btn btn--ghost btn--sm" onclick="generateOTL(${id})"><svg><use href="#i-link"/></svg> ${c.oneTimeLink ? 'Regenerate link' : 'One-time link'}</button>
               </div>
             </div>
           </div>
