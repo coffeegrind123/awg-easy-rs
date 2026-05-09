@@ -62,11 +62,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
 a { color: inherit; }
 
 /* ============== APP SHELL ============== */
+/* Hidden by default to prevent a flash of the admin shell during the
+   ~100ms window before deferred JS routes the user. CSS :has() reveals
+   the shell only when one of its inner .page elements is .active.
+   Login/setup are page-overlays at body root (not descendants of .shell),
+   so they don't trigger the reveal — they cover the viewport themselves. */
 .shell {
-  display: grid;
+  display: none;
   grid-template-columns: 224px 1fr;
   min-height: 100vh;
 }
+.shell:has(.page.active) { display: grid; }
 .aside {
   background: linear-gradient(180deg, var(--bg-surface) 0%, var(--bg) 100%);
   border-right: 1px solid var(--border);

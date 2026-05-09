@@ -85,9 +85,16 @@ async function api(method, path, body) {
   const opts = { method, credentials: 'include', headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const res = await fetch(path, opts);
-  if (res.status === 401) { USER = null; if (!IN_SESSION_CHECK) navigate('/login'); return null; }
+  // 401 on the login endpoint itself is "wrong credentials" — let the caller see it.
+  // 401 anywhere else is "session expired" — redirect to /login.
+  const isLoginEndpoint = method === 'POST' && path === '/api/session';
+  if (res.status === 401 && !isLoginEndpoint) {
+    USER = null;
+    if (!IN_SESSION_CHECK) navigate('/login');
+    return null;
+  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({error: res.statusText}));
+    const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || err.message || res.statusText);
   }
   const ct = res.headers.get('content-type') || '';
