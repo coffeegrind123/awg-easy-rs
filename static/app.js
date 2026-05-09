@@ -65,10 +65,11 @@ function escJs(s) {
   return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r');
 }
 
-// Inline SVG sparkline from a values array. Returns empty string if not enough data.
-function renderSpark(values, w = 60, h = 22, color) {
+// Inline SVG sparkline. Empty/short series renders a dim baseline.
+// className lets callers swap sizing context (peer-spark = row, stat-spark = stats strip).
+function renderSpark(values, w = 60, h = 22, color, className = 'peer-spark') {
   if (!values || values.length < 2) {
-    return `<svg class="peer-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="var(--fg-dim)" stroke-width="1.2" stroke-dasharray="2 3" points="0,${h/2} ${w},${h/2}"/></svg>`;
+    return `<svg class="${className}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="var(--fg-dim)" stroke-width="1.2" stroke-dasharray="2 3" points="0,${h/2} ${w},${h/2}"/></svg>`;
   }
   const max = Math.max(...values, 1);
   const points = values.map((v, i) => {
@@ -77,7 +78,7 @@ function renderSpark(values, w = 60, h = 22, color) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
   const stroke = color || 'var(--fg-soft)';
-  return `<svg class="peer-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="${stroke}" stroke-width="1.4" points="${points}"/></svg>`;
+  return `<svg class="${className}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="${stroke}" stroke-width="1.4" points="${points}"/></svg>`;
 }
 
 // ===================== API =====================
@@ -169,10 +170,12 @@ function routeInternal(path) {
 window.addEventListener('hashchange', route);
 window.addEventListener('load', route);
 
-// Auto-inject tooltip chips on labels with title attribute
+// Auto-inject tooltip chips on labels with title attribute.
+// Restricted to .field-label[title]: a plain <label class="toggle" title="…"> is
+// NOT a tooltip target — appending a ? chip lands in the toggle's visible track.
 function injectTooltips() {
   setTimeout(() => {
-    document.querySelectorAll('label[title], .field-label[title]').forEach(l => {
+    document.querySelectorAll('.field-label[title]').forEach(l => {
       if (!l.querySelector('.tip')) {
         const t = document.createElement('span');
         t.className = 'tip'; t.dataset.tip = l.title; t.textContent = '?';
@@ -347,7 +350,7 @@ function renderStats() {
       <div class="stat-label"><svg><use href="#i-zap"/></svg> Throughput</div>
       <div class="stat-value" style="display:flex;align-items:center;gap:10px">
         <span>${formatBytes(totalThroughput)}<span class="unit">/s</span></span>
-        ${validSpark ? renderSpark(aggSpark, 56, 22, 'var(--accent)').replace('peer-spark', 'stat-spark').replace('class="stat-spark"', 'class="stat-spark" style="opacity:0.7;flex:0 0 auto"') : ''}
+        ${validSpark ? renderSpark(aggSpark, 56, 22, 'var(--accent)', 'stat-spark') : ''}
       </div>
       <div class="stat-sub"><span class="down">↓ ${formatBytes(totalRxRate)}/s</span> · ↑ ${formatBytes(totalTxRate)}/s</div>
     </div>
@@ -376,9 +379,10 @@ function renderClients() {
   if (CLIENTS.length === 0) {
     el.innerHTML = `
       <div class="empty">
+        <div class="empty-glyph"><svg><use href="#i-users"/></svg></div>
         <h3>No peers yet</h3>
-        <p>Create your first peer to get started.</p>
-        <div style="margin-top:14px"><button class="btn btn--primary" onclick="showCreateModal()"><svg><use href="#i-plus"/></svg> New peer</button></div>
+        <p>Create your first peer and we'll generate keys, an address, and a config you can scan straight into AmneziaWG.</p>
+        <div style="margin-top:18px"><button class="btn btn--primary" onclick="showCreateModal()"><svg><use href="#i-plus"/></svg> New peer</button></div>
       </div>`;
     return;
   }
@@ -402,7 +406,9 @@ function renderClients() {
     const rxRate = c.rxRate ? formatBytes(c.rxRate) + '/s' : '—';
     const txRate = c.txRate ? formatBytes(c.txRate) + '/s' : '—';
     const lastSeen = timeAgo(c.latestHandshakeAt);
-    const lastSeenFresh = c.latestHandshakeAt && (Date.now() - new Date(c.latestHandshakeAt).getTime()) < 60000;
+    const lastSeenAge = c.latestHandshakeAt ? (Date.now() - new Date(c.latestHandshakeAt).getTime()) : Infinity;
+    // 3-tier freshness: <60s green-pulse, <3min soft white, otherwise muted.
+    const lastSeenClass = lastSeenAge < 60000 ? 'is-fresh' : lastSeenAge < 180000 ? 'is-recent' : '';
     const sparkSvg = renderSpark(CLIENT_HISTORY[c.id] || []);
 
     const stateTag = !enabled ? '<span class="tag tag--neutral">disabled</span>'
@@ -424,14 +430,17 @@ function renderClients() {
       <div class="${rowClass}">
         <div><span class="dot ${online ? 'dot--on' : 'dot--off'}"></span></div>
         <div class="peer-name">
-          <b onclick="navigate('/clients/${c.id}')">${esc(c.name)} ${stateTag}</b>
+          <div class="peer-name-row">
+            <button class="peer-name-link" onclick="navigate('/clients/${c.id}')">${esc(c.name)}</button>
+            ${stateTag}
+          </div>
           <span>id ${c.id}${c.createdAt ? ' · created ' + new Date(c.createdAt).toISOString().slice(0,10) : ''}</span>
         </div>
         <div class="peer-addr">
           ${esc(c.ipv4Address || '—')}
           ${c.ipv6Address ? `<small>${esc(c.ipv6Address)}</small>` : ''}
         </div>
-        <div class="peer-seen ${lastSeenFresh ? 'is-fresh' : ''}">${lastSeen}</div>
+        <div class="peer-seen ${lastSeenClass}">${lastSeen}</div>
         <div class="peer-tx">
           <div class="peer-rate">
             <span class="down"><span class="arrow">↓</span>${rxRate}</span>
@@ -641,12 +650,8 @@ async function loadClientEdit(id) {
           <div class="card-head">
             <div>
               <div class="card-title">General</div>
-              <div class="card-sub">Identity, addressing, routing.</div>
+              <div class="card-sub">Identity, addressing, routing. Use the row toggle on the clients list to enable / disable.</div>
             </div>
-            <label class="toggle ${c.enabled === false ? '' : 'is-on'} toggle--lg" title="Enabled">
-              <input type="checkbox" id="edit-enabled" ${c.enabled === false ? '' : 'checked'}>
-              <span class="toggle-track"></span>
-            </label>
           </div>
           <div class="card-body">
             <div class="stack">
@@ -806,7 +811,6 @@ function copyText(text) {
 async function saveClient(id) {
   const body = {
     name: $('edit-name').value,
-    enabled: $('edit-enabled').checked,
     ipv4Address: $('edit-ipv4').value,
     ipv6Address: $('edit-ipv6').value,
     mtu: parseInt($('edit-mtu').value) || 1420,
@@ -907,24 +911,24 @@ async function showAdminTab(tab, e) {
                     <span class="input-suffix">seconds</span>
                   </div>
                 </div>
-                <div class="field" style="flex-direction:row;align-items:center;gap:12px">
+                <div class="field field--inline">
                   <label class="toggle ${g.metricsPrometheus ? 'is-on' : ''}">
                     <input type="checkbox" id="adm-metrics-prom" ${g.metricsPrometheus ? 'checked' : ''}>
                     <span class="toggle-track"></span>
                   </label>
                   <div>
                     <label class="field-label" for="adm-metrics-prom" title="Expose /metrics in Prometheus text format">Prometheus metrics</label>
-                    <p class="field-help mono">/metrics</p>
+                    <p class="field-help"><span class="mono">/metrics</span></p>
                   </div>
                 </div>
-                <div class="field" style="flex-direction:row;align-items:center;gap:12px">
+                <div class="field field--inline">
                   <label class="toggle ${g.metricsJson ? 'is-on' : ''}">
                     <input type="checkbox" id="adm-metrics-json" ${g.metricsJson ? 'checked' : ''}>
                     <span class="toggle-track"></span>
                   </label>
                   <div>
                     <label class="field-label" for="adm-metrics-json" title="Expose /metrics.json with structured stats">JSON metrics</label>
-                    <p class="field-help mono">/metrics.json</p>
+                    <p class="field-help"><span class="mono">/metrics.json</span></p>
                   </div>
                 </div>
               </div>
@@ -1028,7 +1032,7 @@ async function showAdminTab(tab, e) {
                     <input type="text" id="adm-if-ipv6" class="mono-input" value="${esc(iface.ipv6Cidr || '')}">
                   </div>
                 </div>
-                <div class="field" style="flex-direction:row;align-items:center;gap:12px">
+                <div class="field field--inline">
                   <label class="toggle ${iface.firewallEnabled ? 'is-on' : ''}">
                     <input type="checkbox" id="adm-if-firewall" ${iface.firewallEnabled ? 'checked' : ''}>
                     <span class="toggle-track"></span>
@@ -1081,7 +1085,7 @@ async function showAdminTab(tab, e) {
                 </div>
               </div>
               <div class="section-rule">Header magic <span style="margin-left:6px;font-weight:400;font-family:var(--font-mono);text-transform:none;letter-spacing:0;color:var(--fg-faint)">non-overlapping per-server values</span></div>
-              <div class="split-3" style="grid-template-columns:repeat(4,1fr);gap:10px">
+              <div class="split-4">
                 <div class="field">
                   <label class="field-label" for="adm-if-h1" title="Magic header for handshake initiation packets. Single value or 'N-M' range. Must not overlap H2-H4">H1</label>
                   <input type="text" id="adm-if-h1" class="mono-input" value="${esc(iface.h1 || '')}">
@@ -1324,9 +1328,9 @@ function updateSteps() {
   const visualMap = { 1: 0, 2: 1, 4: 2 };
   const visual = visualMap[SETUP_STEP] != null ? visualMap[SETUP_STEP] : SETUP_STEP - 1;
   $$('#setup-steps .step').forEach((s, i) => {
-    s.classList.remove('active', 'done');
-    if (i < visual) s.classList.add('done');
-    if (i === visual) s.classList.add('active');
+    s.classList.remove('is-active', 'is-done');
+    if (i < visual) s.classList.add('is-done');
+    if (i === visual) s.classList.add('is-active');
   });
 }
 

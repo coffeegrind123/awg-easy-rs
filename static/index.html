@@ -147,6 +147,21 @@ a { color: inherit; }
   flex-direction: column;
   gap: 6px;
 }
+/* Quieter than .nav-item — sign-out is a utility action, not navigation. */
+.aside-signout {
+  margin-top: 4px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  color: var(--fg-faint);
+  background: none; border: none;
+  font-family: inherit; font-size: 12px; font-weight: 500;
+  display: flex; align-items: center; gap: 10px;
+  cursor: pointer; text-align: left; width: 100%;
+  transition: color 0.12s, background 0.12s;
+}
+.aside-signout svg { width: 14px; height: 14px; opacity: 0.7; flex-shrink: 0; }
+.aside-signout:hover { color: var(--fg-soft); background: var(--bg-elevated); }
+.aside-signout:hover svg { opacity: 1; }
 .server-card {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -378,8 +393,19 @@ label { color: var(--fg-soft); }
 
 /* ============== STATUS DOT ============== */
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-.dot--on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); }
+.dot--on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-tint);
+  animation: dot-breath 2.4s ease-in-out infinite;
+}
 .dot--off { background: var(--fg-dim); }
+@keyframes dot-breath {
+  0%, 100% { box-shadow: 0 0 0 3px var(--ok-tint); }
+  50%      { box-shadow: 0 0 0 5px rgba(74, 222, 128, 0.07); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot--on { animation: none; }
+}
 .status-dot.online { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); animation: none; }
 .status-dot.offline { background: var(--fg-dim); }
 
@@ -436,19 +462,32 @@ label { color: var(--fg-soft); }
 .tbl-row.is-disabled { opacity: 0.55; }
 
 .peer-name { display: flex; flex-direction: column; min-width: 0; }
-.peer-name b { font-size: 13px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.peer-name b:hover { color: var(--accent); }
+.peer-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.peer-name-link {
+  font-size: 13px; font-weight: 600; color: var(--fg);
+  background: none; border: none; padding: 0;
+  cursor: pointer; font-family: inherit;
+  text-align: left;
+  border-radius: 2px;
+  transition: color 0.12s;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.peer-name-link:hover { color: var(--accent); }
+.peer-name-link:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 3px; color: var(--accent); }
 .peer-name span { font-size: 11px; color: var(--fg-faint); font-family: var(--font-mono); margin-top: 1px; }
 .peer-addr { font-family: var(--font-mono); font-size: 12px; color: var(--fg-soft); display: flex; flex-direction: column; gap: 2px; }
 .peer-addr small { font-size: 10.5px; color: var(--fg-faint); }
 .peer-seen { font-size: 12px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
-.peer-seen.is-fresh { color: var(--ok); }
+.peer-seen.is-recent { color: var(--fg-soft); }
+.peer-seen.is-fresh  { color: var(--ok); }
 .peer-tx { display: flex; align-items: center; gap: 10px; }
 .peer-rate { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-mute); display: flex; flex-direction: column; gap: 1px; }
 .peer-rate .down { color: var(--fg-soft); }
 .peer-rate .up { color: var(--fg-mute); }
 .peer-rate .arrow { color: var(--fg-faint); margin-right: 2px; }
 .peer-spark { width: 60px; height: 22px; flex-shrink: 0; }
+.stat-spark { width: 56px; height: 22px; flex-shrink: 0; opacity: 0.75; }
 .peer-expiry { font-size: 12px; color: var(--fg-mute); font-family: var(--font-mono); }
 .peer-expiry.is-soon { color: var(--warn); }
 .peer-actions { display: flex; gap: 2px; justify-content: flex-end; align-items: center; }
@@ -469,13 +508,27 @@ label { color: var(--fg-soft); }
 
 .empty {
   text-align: center;
-  padding: 56px 24px;
+  padding: 64px 24px;
   color: var(--fg-mute);
-  background: var(--bg-surface);
-  border: 1px dashed var(--border);
+  background:
+    radial-gradient(420px 220px at 50% 0%, var(--accent-tint), transparent 70%),
+    var(--bg-surface);
+  border: 1px solid var(--border);
   border-radius: var(--r-md);
+  position: relative;
 }
-.empty h3 { color: var(--fg-soft); margin-bottom: 6px; font-weight: 600; }
+.empty-glyph {
+  width: 56px; height: 56px;
+  margin: 0 auto 18px;
+  display: grid; place-items: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--fg-faint);
+}
+.empty-glyph svg { width: 22px; height: 22px; }
+.empty h3 { color: var(--fg); margin-bottom: 6px; font-weight: 600; font-size: 15px; }
+.empty p  { color: var(--fg-mute); font-size: 13px; max-width: 360px; margin: 0 auto; }
 .loading { text-align: center; padding: 40px; color: var(--fg-mute); font-family: var(--font-mono); font-size: 12px; }
 
 /* ============== EDIT PAGE ============== */
@@ -485,10 +538,14 @@ label { color: var(--fg-soft); }
 .crumb svg { width: 11px; height: 11px; color: var(--fg-faint); }
 .crumb b { color: var(--fg); font-weight: 500; }
 
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.split-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+.split   { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.split-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.split-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .row { display: flex; gap: 12px; align-items: flex-end; }
+/* Inline-row field for "[toggle] [label + helper]" patterns in admin forms.
+   Replaces the repeated inline style="flex-direction:row;align-items:center;gap:12px". */
+.field--inline { flex-direction: row; align-items: center; gap: 12px; }
 
 .section-rule {
   display: flex; align-items: center; gap: 12px;
@@ -617,6 +674,28 @@ label { color: var(--fg-soft); }
 .auth-sub { font-size: 13px; color: var(--fg-mute); margin-bottom: 24px; }
 .auth-form { display: flex; flex-direction: column; gap: 14px; }
 
+/* Step-1 "what we'll set up" preview — gives the welcome screen presence. */
+.setup-preview {
+  display: flex; flex-direction: column; gap: 14px;
+  margin: 4px 0 22px;
+  padding: 16px 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.setup-preview-item { display: flex; gap: 14px; align-items: flex-start; }
+.setup-preview-num {
+  font-family: var(--font-mono);
+  font-size: 11px; font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+  padding-top: 2px;
+  flex-shrink: 0;
+  width: 22px;
+}
+.setup-preview-item b { font-size: 13px; color: var(--fg); display: block; margin-bottom: 2px; font-weight: 600; }
+.setup-preview-item span { font-size: 12px; color: var(--fg-mute); display: block; line-height: 1.5; }
+
 .notice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r-sm); font-size: 12px; line-height: 1.5; }
 .notice svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; }
 .notice--warn { background: var(--warn-tint); color: #facc7a; border: 1px solid rgba(251, 191, 36, 0.20); }
@@ -657,7 +736,7 @@ label { color: var(--fg-soft); }
   align-items: center; justify-content: center;
   padding: 24px;
 }
-.modal-overlay.active { display: flex; }
+.modal-overlay.active { display: flex; animation: modal-fade 0.18s ease both; }
 .modal {
   background: var(--bg-surface);
   border: 1px solid var(--border-strong);
@@ -667,8 +746,14 @@ label { color: var(--fg-soft); }
   max-height: 80vh; overflow-y: auto;
   box-shadow: var(--shadow-lg);
 }
+.modal-overlay.active .modal { animation: modal-rise 0.22s cubic-bezier(0.4, 0, 0.2, 1) both; }
 .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
 .modal--lg { max-width: 640px; }
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-rise { from { transform: translateY(8px) scale(0.985); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay.active, .modal-overlay.active .modal { animation: none; }
+}
 
 /* ============== TOASTS ============== */
 .toast-container {
@@ -700,7 +785,19 @@ label { color: var(--fg-soft); }
   margin: 18px -24px -24px;
 }
 .save-bar .changed { font-size: 12px; color: var(--fg-mute); font-family: var(--font-mono); display: flex; align-items: center; gap: 6px; }
-.save-bar .changed::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.save-bar .changed::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent-line);
+  animation: changed-pulse 1.8s ease-in-out infinite;
+}
+@keyframes changed-pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(251, 178, 106, 0.35); }
+  50%      { box-shadow: 0 0 0 4px rgba(251, 178, 106, 0);    }
+}
+@media (prefers-reduced-motion: reduce) {
+  .save-bar .changed::before { animation: none; }
+}
 .save-bar-spacer { flex: 1; }
 
 /* ============== UTILITIES ============== */
@@ -807,7 +904,7 @@ label { color: var(--fg-soft); }
           <span>version</span> <b id="side-version">—</b>
         </div>
       </div>
-      <button class="nav-item" onclick="doLogout()" style="margin-top:6px">
+      <button class="aside-signout" onclick="doLogout()">
         <svg><use href="#i-logout"/></svg> Sign out
       </button>
     </div>
@@ -973,7 +1070,7 @@ label { color: var(--fg-soft); }
           </div>
           <div id="totp-group" class="field" style="display:none">
             <label class="field-label" for="login-totp">TOTP code</label>
-            <input type="text" id="login-totp" class="input--mono" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" style="letter-spacing:0.4em;text-align:center;font-size:18px;padding:10px 11px">
+            <input type="text" id="login-totp" class="mono-input" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" style="letter-spacing:0.4em;text-align:center;font-size:18px;padding:10px 11px">
             <p class="field-help">From Authy, 1Password, Aegis, or your authenticator of choice.</p>
           </div>
           <label class="checkbox" style="margin-top:2px">
@@ -1006,13 +1103,29 @@ label { color: var(--fg-soft); }
     <div class="auth-main">
       <div class="auth-card">
         <div class="stepper" id="setup-steps">
-          <div class="step active"><div class="step-bar"></div><div class="step-label">01 Welcome</div></div>
+          <div class="step is-active"><div class="step-bar"></div><div class="step-label">01 Welcome</div></div>
           <div class="step"><div class="step-bar"></div><div class="step-label">02 Admin</div></div>
           <div class="step"><div class="step-bar"></div><div class="step-label">03 Endpoint</div></div>
         </div>
         <div id="setup-step1">
           <h1 class="auth-h1">Let's set up your VPN</h1>
           <p class="auth-sub">An admin account, then a server endpoint. That's it.</p>
+          <div class="setup-preview">
+            <div class="setup-preview-item">
+              <span class="setup-preview-num">01</span>
+              <div>
+                <b>Admin account</b>
+                <span>Username and password to manage the server. You can add more admins later.</span>
+              </div>
+            </div>
+            <div class="setup-preview-item">
+              <span class="setup-preview-num">02</span>
+              <div>
+                <b>Server endpoint</b>
+                <span>Where peers connect — public host or IP, plus a UDP port.</span>
+              </div>
+            </div>
+          </div>
           <button class="btn btn--primary" style="height:38px;font-size:14px" onclick="setupGo(2)">Get started <svg><use href="#i-arrow-right"/></svg></button>
         </div>
         <div id="setup-step2" style="display:none">
