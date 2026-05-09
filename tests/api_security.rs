@@ -1396,7 +1396,7 @@ async fn init_spec_rejects_oversize_total_packet() {
 
 #[tokio::test]
 #[serial(db)]
-async fn new_client_defaults_to_advanced_security_on() {
+async fn new_client_defaults_to_advanced_security_auto() {
     seed();
     create_user("admin", "adminpass", 1);
     let app = router();
@@ -1408,7 +1408,9 @@ async fn new_client_defaults_to_advanced_security_on() {
 
     let id = resp["clientId"].as_i64().unwrap();
     let c = db::get_client(id).unwrap();
-    assert_eq!(c.advanced_security, Some(true));
+    // Default is None ("auto") — the kernel auto-detects from H1, and the
+    // userspace amneziawg-go rejects an explicit AdvancedSecurity directive.
+    assert_eq!(c.advanced_security, None);
 }
 
 #[tokio::test]

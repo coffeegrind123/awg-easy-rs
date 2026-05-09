@@ -292,9 +292,12 @@ pub async fn create_client(
         i5: None,
         dns: Some(user_config.default_dns.clone()),
         server_endpoint: None,
-        // Pure AmneziaWG deployment → opt every new peer in by default.
-        // Operator can flip to off (or null for auto-detect) per-client.
-        advanced_security: Some(true),
+        // Default to "auto" (None): the kernel module auto-detects from the
+        // H1 magic header on the first incoming handshake, and the userspace
+        // amneziawg-go fallback chokes on an explicit AdvancedSecurity peer
+        // directive. Operators who want to force the value can flip it
+        // per-peer in the edit page.
+        advanced_security: None,
         enabled: true,
     };
 
