@@ -1,7 +1,8 @@
 use awg_easy_rs::{api, auth, config, db, wg};
 
 use std::net::SocketAddr;
-use axum::{Router, routing::get, response::Response, http::{header, StatusCode}};
+use std::sync::OnceLock;
+use axum::{Router, routing::get, response::Response, http::{header, HeaderMap, StatusCode}};
 use tracing_subscriber::EnvFilter;
 
 // Embedded frontend
@@ -51,24 +52,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Static asset routes
     let static_routes = Router::new()
-        .route("/app.js", get(|| async { js_response(APP_JS) }))
-        .route("/favicon.png", get(|| async { png_response(FAVICON_PNG) }))
-        .route("/favicon-amnezia.ico", get(|| async { ico_response(FAVICON_AWG_ICO) }))
-        .route("/favicon.ico", get(|| async { ico_response(FAVICON_AWG_ICO) }))
-        .route("/logo.png", get(|| async { png_response(LOGO_PNG) }))
-        .route("/logo-amnezia.svg", get(|| async { svg_response(LOGO_AWG_SVG) }))
-        .route("/apple-touch-icon.png", get(|| async { png_response(APPLE_ICON) }))
-        .route("/apple-touch-icon-amnezia.png", get(|| async { png_response(APPLE_ICON_AWG) }))
-        .route("/manifest.json", get(|| async { json_response(MANIFEST_JSON) }));
+        .route("/app.js", get(|h: HeaderMap| async move { js_response(h, APP_JS) }))
+        .route("/favicon.png", get(|h: HeaderMap| async move { png_response(h, FAVICON_PNG, asset_etag("favicon.png", FAVICON_PNG)) }))
+        .route("/favicon-amnezia.ico", get(|h: HeaderMap| async move { ico_response(h, FAVICON_AWG_ICO, asset_etag("favicon-amnezia.ico", FAVICON_AWG_ICO)) }))
+        .route("/favicon.ico", get(|h: HeaderMap| async move { ico_response(h, FAVICON_AWG_ICO, asset_etag("favicon-amnezia.ico", FAVICON_AWG_ICO)) }))
+        .route("/logo.png", get(|h: HeaderMap| async move { png_response(h, LOGO_PNG, asset_etag("logo.png", LOGO_PNG)) }))
+        .route("/logo-amnezia.svg", get(|h: HeaderMap| async move { svg_response(h, LOGO_AWG_SVG, asset_etag("logo-amnezia.svg", LOGO_AWG_SVG)) }))
+        .route("/apple-touch-icon.png", get(|h: HeaderMap| async move { png_response(h, APPLE_ICON, asset_etag("apple-touch-icon.png", APPLE_ICON)) }))
+        .route("/apple-touch-icon-amnezia.png", get(|h: HeaderMap| async move { png_response(h, APPLE_ICON_AWG, asset_etag("apple-touch-icon-amnezia.png", APPLE_ICON_AWG)) }))
+        .route("/manifest.json", get(|h: HeaderMap| async move { json_response(h, MANIFEST_JSON, asset_etag("manifest.json", MANIFEST_JSON)) }));
 
     let app = api::build_router(app_state)
         .merge(static_routes)
-        .fallback(|| async {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .body(axum::body::Body::from(INDEX_HTML))
-                .unwrap()
+        .fallback(|h: HeaderMap| async move {
+            html_response(h, INDEX_HTML)
         });
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config::CONFIG.port));
@@ -79,48 +76,104 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn png_response(data: &'static [u8]) -> Response {
+// ---------------------------------------------------------------------------
+// ETag-backed cache validation. Each asset gets a content-derived ETag
+// computed once at startup; browsers cache aggressively but always revalidate
+// (Cache-Control: no-cache). When the binary is rebuilt the ETag changes, so
+// stale clients automatically pick up the new asset on next page load.
+// ---------------------------------------------------------------------------
+
+fn etag_for_bytes(content: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    format!("\"{:016x}\"", h.finish())
+}
+
+/// Per-asset ETag cache. Keyed by asset name so each route owns its slot.
+fn asset_etag(name: &'static str, content: &'static [u8]) -> &'static str {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut g = cache.lock().expect("etag cache lock");
+    if let Some(v) = g.get(name) {
+        return v;
+    }
+    let leaked: &'static str = Box::leak(etag_for_bytes(content).into_boxed_str());
+    g.insert(name, leaked);
+    leaked
+}
+
+fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+        .map(|v| v.split(',').map(str::trim).any(|t| t == etag || t == "*"))
+        .unwrap_or(false)
+}
+
+fn not_modified(etag: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+fn binary_response(headers: HeaderMap, content_type: &'static str, data: &'static [u8], etag: &'static str) -> Response {
+    if matches_etag(&headers, etag) {
+        return not_modified(etag);
+    }
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::ETAG, etag)
         .body(axum::body::Body::from(data))
         .unwrap()
 }
 
-fn ico_response(data: &'static [u8]) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/x-icon")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(axum::body::Body::from(data))
-        .unwrap()
+fn png_response(headers: HeaderMap, data: &'static [u8], etag: &'static str) -> Response {
+    binary_response(headers, "image/png", data, etag)
 }
 
-fn svg_response(data: &'static [u8]) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/svg+xml")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(axum::body::Body::from(data))
-        .unwrap()
+fn ico_response(headers: HeaderMap, data: &'static [u8], etag: &'static str) -> Response {
+    binary_response(headers, "image/x-icon", data, etag)
 }
 
-fn json_response(data: &'static [u8]) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(axum::body::Body::from(data))
-        .unwrap()
+fn svg_response(headers: HeaderMap, data: &'static [u8], etag: &'static str) -> Response {
+    binary_response(headers, "image/svg+xml", data, etag)
 }
 
-fn js_response(data: &'static str) -> Response {
+fn json_response(headers: HeaderMap, data: &'static [u8], etag: &'static str) -> Response {
+    binary_response(headers, "application/json", data, etag)
+}
+
+fn js_response(headers: HeaderMap, data: &'static str) -> Response {
+    let etag = asset_etag("app.js", data.as_bytes());
+    if matches_etag(&headers, etag) {
+        return not_modified(etag);
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/javascript; charset=utf-8")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::ETAG, etag)
         .header("X-Content-Type-Options", "nosniff")
+        .body(axum::body::Body::from(data))
+        .unwrap()
+}
+
+fn html_response(headers: HeaderMap, data: &'static str) -> Response {
+    let etag = asset_etag("index.html", data.as_bytes());
+    if matches_etag(&headers, etag) {
+        return not_modified(etag);
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::ETAG, etag)
         .body(axum::body::Body::from(data))
         .unwrap()
 }
