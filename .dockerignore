@@ -1,0 +1,36 @@
+# Keep the build context tiny — multi-GB target/ would otherwise be uploaded
+# to the Docker daemon on every image build.
+target/
+**/*.rs.bk
+
+# VCS / CI / editor metadata that has no business inside the image
+.git/
+.github/
+.idea/
+.vscode/
+.gitignore
+
+# Documentation and project meta — not needed at runtime
+README.md
+LICENSE
+ANALYSIS.md
+CHANGELOG.md
+docs/
+
+# Test scaffolding — the release build doesn't need integration tests
+tests/
+
+# Compose / runtime artifacts
+docker-compose.yml
+docker-compose.*.yml
+*.log
+
+# OS / shell debris
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Generated WireGuard configs — never bake these into the image
+*.conf

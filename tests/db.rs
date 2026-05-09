@@ -251,6 +251,7 @@ fn create_test_client_with_ip(name: &str, ipv4: &str, ipv6: &str) -> i64 {
         i1: None, i2: None, i3: None, i4: None, i5: None,
         dns: Some(r#"["1.1.1.1"]"#.into()),
         server_endpoint: None,
+        advanced_security: Some(true),
         enabled: true,
     }).unwrap()
 }
@@ -359,6 +360,7 @@ fn client_ipv4_unique_constraint() {
         i1: None, i2: None, i3: None, i4: None, i5: None,
         dns: Some(r#"["1.1.1.1"]"#.into()),
         server_endpoint: None,
+        advanced_security: Some(true),
         enabled: true,
     });
     assert!(result.is_err());

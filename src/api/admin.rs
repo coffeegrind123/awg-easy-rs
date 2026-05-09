@@ -21,7 +21,7 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{api_err, map_err, ok_success, require_auth, to_snake_case, value_to_string, AppState};
+use super::{api_err, map_err, ok_success, require_auth, value_to_string, AppState};
 use crate::{db, wg};
 
 fn get_i64(map: &serde_json::Map<String, Value>, key: &str) -> Option<i64> {
@@ -34,15 +34,22 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
     let jmax = get_i64(map, "jMax").or_else(|| get_i64(map, "jmax"));
     let s1 = get_i64(map, "s1");
     let s2 = get_i64(map, "s2");
+    let s3 = get_i64(map, "s3");
+    let s4 = get_i64(map, "s4");
 
     if let Some(jc) = jc {
-        if jc < 1 || jc > 128 {
-            return Err(api_err(StatusCode::BAD_REQUEST, "Jc must be 1-128"));
+        // Kernel permits jc == 0 ("junk packets disabled"); upstream
+        // awg-easy required >= 1. We follow the kernel and accept 0.
+        if jc < 0 || jc > 128 {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Jc must be 0-128"));
         }
     }
     if let (Some(jmin), Some(jmax)) = (jmin, jmax) {
-        if jmax <= jmin {
-            return Err(api_err(StatusCode::BAD_REQUEST, "Jmax must be > Jmin"));
+        // Kernel device.c rejects only when jmax > 0 AND jmax < jmin. The
+        // jmax == jmin case is handled separately below (kernel auto-bumps,
+        // we reject when jc != 0 so the user can fix it explicitly).
+        if jmax > 0 && jmax < jmin {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Jmax must be >= Jmin"));
         }
     }
     if let Some(jmin) = jmin {
@@ -51,8 +58,20 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
         }
     }
     if let Some(jmax) = jmax {
-        if jmax < 1 || jmax > 1280 {
-            return Err(api_err(StatusCode::BAD_REQUEST, "Jmax must be 1-1280"));
+        // Spec: Jmax < 1280 (strict)
+        if jmax < 1 || jmax > 1279 {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Jmax must be 1-1279"));
+        }
+    }
+    // Mirror kernel device.c post-config check: when Jc != 0 the kernel
+    // requires Jmax > Jmin (otherwise it auto-increments). We reject the
+    // equal case at API time so the user notices.
+    if let (Some(jc), Some(jmin), Some(jmax)) = (jc, jmin, jmax) {
+        if jc != 0 && jmin == jmax {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "When Jc != 0, Jmax must be strictly greater than Jmin",
+            ));
         }
     }
     if let Some(s1) = s1 {
@@ -65,9 +84,33 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
             return Err(api_err(StatusCode::BAD_REQUEST, "S2 must be 0-1188"));
         }
     }
+    if let Some(s3) = s3 {
+        // Per gl-inet AmneziaWG-2.0 parameter table.
+        if s3 < 0 || s3 > 1216 {
+            return Err(api_err(StatusCode::BAD_REQUEST, "S3 must be 0-1216"));
+        }
+    }
+    if let Some(s4) = s4 {
+        // Per AmneziaWG-2.0 transport-message padding limit.
+        if s4 < 0 || s4 > 32 {
+            return Err(api_err(StatusCode::BAD_REQUEST, "S4 must be 0-32"));
+        }
+    }
     if let (Some(s1), Some(s2)) = (s1, s2) {
         if s1 > 0 && s2 > 0 && s1 + 56 == s2 {
             return Err(api_err(StatusCode::BAD_REQUEST, "S1 + 56 must not equal S2"));
+        }
+    }
+
+    // Validate I1-I5 CPS tag grammar
+    for key in ["i1", "i2", "i3", "i4", "i5"] {
+        if let Some(val) = map.get(key).and_then(|v| v.as_str()) {
+            if let Err(msg) = crate::wg::params::validate_init_spec(val) {
+                return Err(api_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid {}: {msg}", key.to_uppercase()),
+                ));
+            }
         }
     }
 
@@ -121,12 +164,21 @@ pub async fn get_general(
     let _admin = require_admin(&jar, &state)?;
     let general = db::get_general().map_err(map_err)?;
 
+    // Never return the metrics password (it's a hash anyway, but treat the
+    // hash as a credential). We surface only a boolean so the UI can display
+    // "set / not set" without the value.
+    let metrics_password_set = general
+        .metrics_password
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
     Ok(Json(json!({
         "setupStep": general.setup_step,
         "sessionTimeout": general.session_timeout,
         "metricsPrometheus": general.metrics_prometheus,
         "metricsJson": general.metrics_json,
-        "metricsPassword": general.metrics_password,
+        "metricsPasswordSet": metrics_password_set,
     })))
 }
 
@@ -143,36 +195,36 @@ pub async fn update_general(
 
     let mut fields = db::UpdateMap::new();
     if let Value::Object(map) = &body {
-        // Map known fields with snake_case conversion
-        if let Some(val) = map.get("sessionTimeout") {
-            if let Some(s) = value_to_string(val) {
-                fields.insert("session_timeout".into(), s);
-            }
-        }
-        if let Some(val) = map.get("metricsPrometheus") {
-            if let Some(s) = value_to_string(val) {
-                fields.insert("metrics_prometheus".into(), s);
-            }
-        }
-        if let Some(val) = map.get("metricsJson") {
-            if let Some(s) = value_to_string(val) {
-                fields.insert("metrics_json".into(), s);
-            }
-        }
-        if let Some(val) = map.get("metricsPassword") {
-            if let Some(s) = value_to_string(val) {
-                fields.insert("metrics_password".into(), s);
-            }
-        }
-        // Generic fields
-        for (key, val) in map {
-            if !["sessionTimeout", "metricsPrometheus", "metricsJson", "metricsPassword",
-                "sessionPassword"]
-                .contains(&key.as_str())
-            {
+        // Strict whitelist — never accept arbitrary keys here. The generic
+        // pass-through that previously existed could be abused (with admin
+        // credentials) to reset `setupStep` and re-trigger the setup wizard.
+        let mappings: &[(&str, &str)] = &[
+            ("sessionTimeout", "session_timeout"),
+            ("metricsPrometheus", "metrics_prometheus"),
+            ("metricsJson", "metrics_json"),
+        ];
+        for (json_key, db_key) in mappings {
+            if let Some(val) = map.get(*json_key) {
                 if let Some(s) = value_to_string(val) {
-                    fields.insert(to_snake_case(key), s);
+                    fields.insert((*db_key).into(), s);
                 }
+            }
+        }
+        // Metrics password: never store cleartext. We hash with SHA-256 hex
+        // and the metrics endpoints constant-time-compare against the hash.
+        // Empty / null clears the value.
+        if let Some(val) = map.get("metricsPassword") {
+            match val {
+                Value::Null => {
+                    fields.insert("metrics_password".into(), String::new());
+                }
+                Value::String(s) if s.is_empty() => {
+                    fields.insert("metrics_password".into(), String::new());
+                }
+                Value::String(s) => {
+                    fields.insert("metrics_password".into(), crate::auth::sha256(s));
+                }
+                _ => {}
             }
         }
     }
@@ -277,9 +329,12 @@ pub async fn get_userconfig(
         serde_json::from_str(&uc.default_allowed_ips).unwrap_or(json!([]));
 
     Ok(Json(json!({
-        "defaultMTU": uc.default_mtu,
+        // Match the frontend / Node.js naming exactly: defaultMtu / defaultDns
+        // (lowercase initialism). The previous all-caps form silently failed
+        // to round-trip through the Vue UI.
+        "defaultMtu": uc.default_mtu,
         "defaultPersistentKeepalive": uc.default_persistent_keepalive,
-        "defaultDNS": default_dns,
+        "defaultDns": default_dns,
         "defaultAllowedIps": default_allowed_ips,
         "defaultJC": uc.default_j_c,
         "defaultJMin": uc.default_j_min,
@@ -307,29 +362,34 @@ pub async fn update_userconfig(
 
     let mut fields = db::UpdateMap::new();
     if let Value::Object(map) = &body {
-        let mappings = [
-            ("defaultMTU", "default_mtu"),
-            ("defaultPersistentKeepalive", "default_persistent_keepalive"),
-            ("defaultJC", "default_j_c"),
-            ("defaultJMin", "default_j_min"),
-            ("defaultJMax", "default_j_max"),
-            ("defaultI1", "default_i1"),
-            ("defaultI2", "default_i2"),
-            ("defaultI3", "default_i3"),
-            ("defaultI4", "default_i4"),
-            ("defaultI5", "default_i5"),
-            ("host", "host"),
-            ("port", "port"),
+        // Accept BOTH the all-caps initialism (legacy clients) and the
+        // camelCase form used by the modern UI/Nuxt server.
+        let mappings: &[(&[&str], &str)] = &[
+            (&["defaultMtu", "defaultMTU"], "default_mtu"),
+            (&["defaultPersistentKeepalive"], "default_persistent_keepalive"),
+            (&["defaultJC"], "default_j_c"),
+            (&["defaultJMin"], "default_j_min"),
+            (&["defaultJMax"], "default_j_max"),
+            (&["defaultI1"], "default_i1"),
+            (&["defaultI2"], "default_i2"),
+            (&["defaultI3"], "default_i3"),
+            (&["defaultI4"], "default_i4"),
+            (&["defaultI5"], "default_i5"),
+            (&["host"], "host"),
+            (&["port"], "port"),
         ];
-        for (json_key, db_key) in &mappings {
-            if let Some(val) = map.get(*json_key) {
-                if let Some(s) = value_to_string(val) {
-                    fields.insert(db_key.to_string(), s);
+        for (json_keys, db_key) in mappings {
+            for k in *json_keys {
+                if let Some(val) = map.get(*k) {
+                    if let Some(s) = value_to_string(val) {
+                        fields.insert((*db_key).into(), s);
+                        break;
+                    }
                 }
             }
         }
-        // DNS array -> JSON string
-        if let Some(val) = map.get("defaultDNS") {
+        // DNS array -> JSON string (accept both spellings)
+        if let Some(val) = map.get("defaultDns").or_else(|| map.get("defaultDNS")) {
             let s = serde_json::to_string(val).unwrap_or_default();
             fields.insert("default_dns".into(), s);
         }
@@ -358,6 +418,10 @@ pub async fn get_interface(
     let _admin = require_admin(&jar, &state)?;
     let iface = db::get_interface().map_err(map_err)?;
 
+    // Note: j1/j2/j3/itime exist as DB columns for drop-in upstream
+    // compatibility but are intentionally NOT surfaced to the UI — they are
+    // not parsed by awg/awg-quick/the kernel module, so editing them would
+    // mislead the user and break interface bring-up if non-empty.
     Ok(Json(json!({
         "name": iface.name,
         "device": iface.device,
@@ -382,10 +446,6 @@ pub async fn get_interface(
         "i3": iface.i3,
         "i4": iface.i4,
         "i5": iface.i5,
-        "j1": iface.j1,
-        "j2": iface.j2,
-        "j3": iface.j3,
-        "itime": iface.itime,
         "firewallEnabled": iface.firewall_enabled,
         "enabled": iface.enabled,
     })))
@@ -430,10 +490,9 @@ pub async fn update_interface(
             ("i3", "i3"),
             ("i4", "i4"),
             ("i5", "i5"),
-            ("j1", "j1"),
-            ("j2", "j2"),
-            ("j3", "j3"),
-            ("itime", "itime"),
+            // j1/j2/j3/itime are intentionally NOT accepted — see comment on
+            // get_interface() above. Even if a client POSTs them, we drop
+            // the values silently to avoid future-broken configs.
             ("device", "device"),
         ];
         for (json_key, db_key) in &mappings {
@@ -550,19 +609,19 @@ pub async fn restart_interface(
 // IP detection helpers
 // ---------------------------------------------------------------------------
 
-fn exec_cmd(cmd: &str) -> String {
-    std::process::Command::new("bash")
-        .arg("-c")
-        .arg(cmd)
+/// Run a command with explicit argv; never invokes a shell.
+fn run_argv(prog: &str, args: &[&str]) -> String {
+    std::process::Command::new(prog)
+        .args(args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
 }
 
 fn get_public_ip() -> String {
-    // Try multiple services
+    // URLs are constants — no user input ever reaches the command line.
     for url in &["https://api.ipify.org", "https://ifconfig.me/ip"] {
-        let out = exec_cmd(&format!("curl -s --max-time 5 {}", url));
+        let out = run_argv("curl", &["-s", "--max-time", "5", url]);
         if !out.is_empty() && out.len() < 50 {
             return out;
         }
@@ -571,11 +630,23 @@ fn get_public_ip() -> String {
 }
 
 fn get_private_ips() -> Vec<String> {
-    let out = exec_cmd(
-        "hostname -I 2>/dev/null || ip -4 addr show | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | grep -v 127.0.0.1",
-    );
-    if out.is_empty() {
-        return vec![];
+    // hostname -I prints all assigned IPv4 addresses on stdout.
+    let out = run_argv("hostname", &["-I"]);
+    if !out.is_empty() {
+        return out.split_whitespace().map(|s| s.to_string()).collect();
     }
-    out.split_whitespace().map(|s| s.to_string()).collect()
+    // Fallback: parse `ip -4 addr show` output. Still no shell parsing.
+    let out = run_argv("ip", &["-4", "addr", "show"]);
+    let mut ips = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("inet ") {
+            if let Some(ip) = rest.split('/').next() {
+                if ip != "127.0.0.1" {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+    ips
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -12,15 +12,41 @@ use crate::config::CONFIG;
 // ---------------------------------------------------------------------------
 // Global database handle – initialised once by init_db()
 // ---------------------------------------------------------------------------
-static mut DB: Option<Mutex<Connection>> = None;
+//
+// The outer OnceLock is initialised on first use; the inner Mutex<Option<…>>
+// allows the test harness to swap the connection between tests without UB.
+static DB: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
 
-fn conn() -> MutexGuard<'static, Connection> {
-    unsafe {
-        (*std::ptr::addr_of!(DB))
+fn db_slot() -> &'static Mutex<Option<Connection>> {
+    DB.get_or_init(|| Mutex::new(None))
+}
+
+/// A guard that exposes the underlying SQLite connection while the global
+/// mutex is held. Mirrors the previous `MutexGuard<Connection>` API.
+pub struct ConnGuard {
+    inner: MutexGuard<'static, Option<Connection>>,
+}
+
+impl std::ops::Deref for ConnGuard {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        self.inner
             .as_ref()
             .expect("Database not initialised – call db::init_db() first")
-            .lock()
-            .expect("Database lock poisoned")
+    }
+}
+
+impl std::ops::DerefMut for ConnGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner
+            .as_mut()
+            .expect("Database not initialised – call db::init_db() first")
+    }
+}
+
+fn conn() -> ConnGuard {
+    ConnGuard {
+        inner: db_slot().lock().expect("Database lock poisoned"),
     }
 }
 
@@ -98,6 +124,12 @@ pub struct Client {
     pub i5: Option<String>,
     pub dns: Option<String>,
     pub server_endpoint: Option<String>,
+    /// Tri-state per-peer AmneziaWG opt-in:
+    /// - `Some(true)` → emit `AdvancedSecurity = on` in the [Peer] block
+    /// - `Some(false)` → emit `AdvancedSecurity = off`
+    /// - `None` → omit the key entirely; the kernel auto-detects on first
+    ///   handshake by validating the H1 magic header.
+    pub advanced_security: Option<bool>,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -201,6 +233,7 @@ pub struct CreateClientParams {
     pub i5: Option<String>,
     pub dns: Option<String>,
     pub server_endpoint: Option<String>,
+    pub advanced_security: Option<bool>,
     pub enabled: bool,
 }
 
@@ -229,12 +262,15 @@ fn int_to_bool(i: i64) -> bool {
     i != 0
 }
 
-fn opt_bool_to_int(b: Option<bool>) -> Option<i64> {
-    b.map(bool_to_int)
-}
-
-fn opt_int_to_bool(i: Option<i64>) -> Option<bool> {
-    i.map(int_to_bool)
+/// Check if an IPv4/IPv6 address string is contained in the supplied CIDR.
+pub fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
+    if let (Ok(net), Ok(addr)) = (cidr.parse::<Ipv4Net>(), ip.parse::<std::net::Ipv4Addr>()) {
+        return net.contains(&addr);
+    }
+    if let (Ok(net), Ok(addr)) = (cidr.parse::<Ipv6Net>(), ip.parse::<std::net::Ipv6Addr>()) {
+        return net.contains(&addr);
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +348,15 @@ impl Client {
             i5: row.get("i5")?,
             dns: row.get("dns")?,
             server_endpoint: row.get("server_endpoint")?,
+            // Older DBs (created before the column was added) may not have
+            // this column; tolerate the missing-column case by defaulting
+            // to None so the [Peer] block omits the key and the kernel
+            // auto-detects from the H1 magic header.
+            advanced_security: row
+                .get::<_, Option<i64>>("advanced_security")
+                .ok()
+                .flatten()
+                .map(int_to_bool),
             enabled: int_to_bool(row.get::<_, i64>("enabled")?),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -472,6 +517,7 @@ CREATE TABLE IF NOT EXISTS clients_table (
     i5                  TEXT,
     dns                 TEXT,
     server_endpoint     TEXT,
+    advanced_security   INTEGER,
     enabled             INTEGER NOT NULL DEFAULT 1,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -591,7 +637,37 @@ fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(CREATE_HOOKS)?;
     conn.execute_batch(CREATE_GENERAL)?;
     conn.execute_batch(CREATE_ONE_TIME_LINKS)?;
+    apply_migrations(conn)?;
     Ok(())
+}
+
+/// Apply additive schema migrations needed for upgrading from an older
+/// awg-easy-rs / awg-easy DB. Each migration is idempotent — checking column
+/// existence via `PRAGMA table_info` before issuing ALTER TABLE.
+fn apply_migrations(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "clients_table", "advanced_security")? {
+        conn.execute_batch(
+            "ALTER TABLE clients_table ADD COLUMN advanced_security INTEGER",
+        )?;
+        tracing::info!(
+            "DB migration: added clients_table.advanced_security (per-peer AdvancedSecurity flag)"
+        );
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    // SQLite's `PRAGMA table_info(<name>)` returns one row per column; the
+    // `name` field is the second column.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get("name")?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Seed default rows when general_table is empty (first run).
@@ -667,9 +743,8 @@ pub fn init_db() -> Result<()> {
     let c = Connection::open(&CONFIG.db_path).context("Failed to open SQLite database")?;
     create_tables(&c)?;
     seed_if_empty(&c)?;
-    unsafe {
-        std::ptr::addr_of_mut!(DB).write(Some(Mutex::new(c)));
-    }
+    let mut guard = db_slot().lock().expect("Database lock poisoned");
+    *guard = Some(c);
     tracing::info!("Database ready at {}", CONFIG.db_path);
     Ok(())
 }
@@ -680,49 +755,84 @@ pub fn init_test_db() {
     let c = Connection::open_in_memory().expect("in-memory DB open");
     create_tables(&c).expect("test db create_tables");
     seed_if_empty(&c).expect("test db seed");
-    unsafe {
-        std::ptr::addr_of_mut!(DB).write(Some(Mutex::new(c)));
-    }
+    let mut guard = db_slot().lock().expect("Database lock poisoned");
+    *guard = Some(c);
 }
 
 // ---------------------------------------------------------------------------
 // Generic UPDATE helper – maps HashMap entries -> SET col = ? clauses
 // ---------------------------------------------------------------------------
 
-fn build_update(
+/// Reference to a single bound value used in the WHERE clause of a generic
+/// UPDATE.  Strings are matched case-sensitively, integers via SQLite's
+/// numeric comparison.
+#[derive(Debug, Clone)]
+pub enum WhereVal<'a> {
+    Str(&'a str),
+    I64(i64),
+}
+
+fn build_update<'a>(
     table: &str,
-    where_clause: &str,
-    fields: &UpdateMap,
+    where_col: &str,
+    where_val: WhereVal<'a>,
+    fields: &'a UpdateMap,
     valid_columns: &[&str],
-) -> Result<(String, Vec<String>)> {
+    valid_where_columns: &[&str],
+) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql + 'a>>)> {
+    if !valid_where_columns.contains(&where_col) {
+        return Err(anyhow!(
+            "Invalid where column '{}' for table {}",
+            where_col,
+            table
+        ));
+    }
     for col in fields.keys() {
         if !valid_columns.contains(&col.as_str()) {
             return Err(anyhow!("Invalid column '{}' for table {}", col, table));
         }
     }
     let mut sets: Vec<String> = Vec::with_capacity(fields.len() + 1);
-    let mut vals: Vec<String> = Vec::with_capacity(fields.len());
+    let mut vals: Vec<Box<dyn rusqlite::types::ToSql + 'a>> = Vec::with_capacity(fields.len() + 1);
     for (col, val) in fields {
         sets.push(format!("{} = ?", col));
-        vals.push(val.clone());
+        vals.push(Box::new(val.clone()));
     }
     if sets.is_empty() {
         return Err(anyhow!("No fields to update on {}", table));
     }
     sets.push("updated_at = datetime('now')".into());
     let sql = format!(
-        "UPDATE {} SET {} WHERE {}",
+        "UPDATE {} SET {} WHERE {} = ?",
         table,
         sets.join(", "),
-        where_clause
+        where_col,
     );
+    match where_val {
+        WhereVal::Str(s) => vals.push(Box::new(s.to_string())),
+        WhereVal::I64(n) => vals.push(Box::new(n)),
+    }
     Ok((sql, vals))
 }
 
-fn exec_update(table: &str, where_clause: &str, fields: &UpdateMap, valid_columns: &[&str]) -> Result<()> {
-    let (sql, vals) = build_update(table, where_clause, fields, valid_columns)?;
+fn exec_update<'a>(
+    table: &str,
+    where_col: &str,
+    where_val: WhereVal<'a>,
+    fields: &'a UpdateMap,
+    valid_columns: &[&str],
+    valid_where_columns: &[&str],
+) -> Result<()> {
+    let (sql, vals) = build_update(
+        table,
+        where_col,
+        where_val,
+        fields,
+        valid_columns,
+        valid_where_columns,
+    )?;
     let refs: Vec<&dyn rusqlite::types::ToSql> =
-        vals.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        vals.iter().map(|b| b.as_ref() as &dyn rusqlite::types::ToSql).collect();
     conn().execute(&sql, refs.as_slice())?;
     Ok(())
 }
@@ -751,7 +861,14 @@ const VALID_INTERFACE_COLUMNS: &[&str] = &[
 ];
 
 pub fn update_interface(fields: &UpdateMap) -> Result<()> {
-    exec_update("interfaces_table", "name = 'wg0'", fields, VALID_INTERFACE_COLUMNS)
+    exec_update(
+        "interfaces_table",
+        "name",
+        WhereVal::Str("wg0"),
+        fields,
+        VALID_INTERFACE_COLUMNS,
+        &["name"],
+    )
 }
 
 pub fn update_key_pair(pub_key: &str, priv_key: &str) -> Result<()> {
@@ -819,58 +936,53 @@ pub fn get_client(id: i64) -> Result<Client> {
 }
 
 pub fn create_client(data: &CreateClientParams) -> Result<i64> {
-    let c = conn();
-    c.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| -> Result<i64> {
-        c.execute(
-            "INSERT INTO clients_table \
-             (user_id, interface_id, name, ipv4_address, ipv6_address, private_key, public_key, \
-              pre_shared_key, pre_up, post_up, pre_down, post_down, expires_at, \
-              allowed_ips, server_allowed_ips, firewall_ips, \
-              persistent_keepalive, mtu, j_c, j_min, j_max, i1, i2, i3, i4, i5, \
-              dns, server_endpoint, enabled) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,\
-                     ?22,?23,?24,?25,?26,?27,?28,?29)",
-            params![
-                data.user_id,
-                data.interface_id,
-                data.name,
-                data.ipv4_address,
-                data.ipv6_address,
-                data.private_key,
-                data.public_key,
-                data.pre_shared_key,
-                data.pre_up,
-                data.post_up,
-                data.pre_down,
-                data.post_down,
-                data.expires_at,
-                data.allowed_ips,
-                data.server_allowed_ips,
-                data.firewall_ips,
-                data.persistent_keepalive,
-                data.mtu,
-                data.j_c,
-                data.j_min,
-                data.j_max,
-                data.i1,
-                data.i2,
-                data.i3,
-                data.i4,
-                data.i5,
-                data.dns,
-                data.server_endpoint,
-                bool_to_int(data.enabled),
-            ],
-        )?;
-        Ok(c.last_insert_rowid())
-    })();
-    if result.is_err() {
-        let _ = c.execute_batch("ROLLBACK");
-    } else {
-        c.execute_batch("COMMIT")?;
-    }
-    result
+    let mut c = conn();
+    let tx = c.transaction()?;
+    tx.execute(
+        "INSERT INTO clients_table \
+         (user_id, interface_id, name, ipv4_address, ipv6_address, private_key, public_key, \
+          pre_shared_key, pre_up, post_up, pre_down, post_down, expires_at, \
+          allowed_ips, server_allowed_ips, firewall_ips, \
+          persistent_keepalive, mtu, j_c, j_min, j_max, i1, i2, i3, i4, i5, \
+          dns, server_endpoint, advanced_security, enabled) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,\
+                 ?22,?23,?24,?25,?26,?27,?28,?29,?30)",
+        params![
+            data.user_id,
+            data.interface_id,
+            data.name,
+            data.ipv4_address,
+            data.ipv6_address,
+            data.private_key,
+            data.public_key,
+            data.pre_shared_key,
+            data.pre_up,
+            data.post_up,
+            data.pre_down,
+            data.post_down,
+            data.expires_at,
+            data.allowed_ips,
+            data.server_allowed_ips,
+            data.firewall_ips,
+            data.persistent_keepalive,
+            data.mtu,
+            data.j_c,
+            data.j_min,
+            data.j_max,
+            data.i1,
+            data.i2,
+            data.i3,
+            data.i4,
+            data.i5,
+            data.dns,
+            data.server_endpoint,
+            data.advanced_security.map(bool_to_int),
+            bool_to_int(data.enabled),
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(id)
 }
 
 const VALID_CLIENT_COLUMNS: &[&str] = &[
@@ -878,11 +990,19 @@ const VALID_CLIENT_COLUMNS: &[&str] = &[
     "private_key", "public_key", "pre_shared_key", "pre_up", "post_up",
     "pre_down", "post_down", "expires_at", "allowed_ips", "server_allowed_ips",
     "firewall_ips", "persistent_keepalive", "mtu", "j_c", "j_min", "j_max",
-    "i1", "i2", "i3", "i4", "i5", "dns", "server_endpoint", "enabled",
+    "i1", "i2", "i3", "i4", "i5", "dns", "server_endpoint",
+    "advanced_security", "enabled",
 ];
 
 pub fn update_client(id: i64, fields: &UpdateMap) -> Result<()> {
-    exec_update("clients_table", &format!("id = {id}"), fields, VALID_CLIENT_COLUMNS)
+    exec_update(
+        "clients_table",
+        "id",
+        WhereVal::I64(id),
+        fields,
+        VALID_CLIENT_COLUMNS,
+        &["id"],
+    )
 }
 
 pub fn delete_client(id: i64) -> Result<()> {
@@ -898,6 +1018,31 @@ pub fn toggle_client(id: i64, enabled: bool) -> Result<()> {
     let mut fields = UpdateMap::new();
     fields.insert("enabled".into(), bool_to_int(enabled).to_string());
     update_client(id, &fields)
+}
+
+/// Set the per-peer AmneziaWG flag. `None` clears the column to SQL NULL —
+/// emitted configs will then omit the `AdvancedSecurity` line and the
+/// kernel will auto-detect from the H1 magic header.
+pub fn set_client_advanced_security(id: i64, value: Option<bool>) -> Result<()> {
+    let c = conn();
+    let n = match value {
+        Some(b) => c.execute(
+            "UPDATE clients_table \
+             SET advanced_security = ?1, updated_at = datetime('now') \
+             WHERE id = ?2",
+            params![bool_to_int(b), id],
+        )?,
+        None => c.execute(
+            "UPDATE clients_table \
+             SET advanced_security = NULL, updated_at = datetime('now') \
+             WHERE id = ?1",
+            params![id],
+        )?,
+    };
+    if n == 0 {
+        return Err(anyhow!("Client {id} not found"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -956,7 +1101,14 @@ const VALID_USER_COLUMNS: &[&str] = &[
 ];
 
 pub fn update_user(id: i64, fields: &UpdateMap) -> Result<()> {
-    exec_update("users_table", &format!("id = {id}"), fields, VALID_USER_COLUMNS)
+    exec_update(
+        "users_table",
+        "id",
+        WhereVal::I64(id),
+        fields,
+        VALID_USER_COLUMNS,
+        &["id"],
+    )
 }
 
 pub fn update_password(id: i64, hash: &str) -> Result<()> {
@@ -987,7 +1139,14 @@ const VALID_USER_CONFIG_COLUMNS: &[&str] = &[
 ];
 
 pub fn update_user_config(fields: &UpdateMap) -> Result<()> {
-    exec_update("user_configs_table", "id = 'wg0'", fields, VALID_USER_CONFIG_COLUMNS)
+    exec_update(
+        "user_configs_table",
+        "id",
+        WhereVal::Str("wg0"),
+        fields,
+        VALID_USER_CONFIG_COLUMNS,
+        &["id"],
+    )
 }
 
 pub fn update_host_port(host: &str, port: i64) -> Result<()> {
@@ -1014,7 +1173,14 @@ pub fn get_hooks() -> Result<Hooks> {
 const VALID_HOOKS_COLUMNS: &[&str] = &["pre_up", "post_up", "pre_down", "post_down"];
 
 pub fn update_hooks(data: &UpdateMap) -> Result<()> {
-    exec_update("hooks_table", "id = 'wg0'", data, VALID_HOOKS_COLUMNS)
+    exec_update(
+        "hooks_table",
+        "id",
+        WhereVal::Str("wg0"),
+        data,
+        VALID_HOOKS_COLUMNS,
+        &["id"],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,7 +1203,14 @@ const VALID_GENERAL_COLUMNS: &[&str] = &[
 ];
 
 pub fn update_general(data: &UpdateMap) -> Result<()> {
-    exec_update("general_table", "id = 1", data, VALID_GENERAL_COLUMNS)
+    exec_update(
+        "general_table",
+        "id",
+        WhereVal::I64(1),
+        data,
+        VALID_GENERAL_COLUMNS,
+        &["id"],
+    )
 }
 
 pub fn get_setup_step() -> Result<i64> {

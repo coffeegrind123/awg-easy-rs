@@ -85,6 +85,27 @@ pub struct UpdateClientRequest {
     i3: Option<String>,
     i4: Option<String>,
     i5: Option<String>,
+    /// Per-peer AmneziaWG opt-in. `null` clears any previous override and
+    /// lets the kernel auto-detect; `true`/`false` write `AdvancedSecurity
+    /// = on`/`off` to the [Peer] block. Outer `Option` distinguishes
+    /// "field absent in the JSON" from "field explicitly null".
+    #[serde(
+        rename = "advancedSecurity",
+        default,
+        deserialize_with = "deserialize_tristate_bool"
+    )]
+    advanced_security: Option<Option<bool>>,
+}
+
+fn deserialize_tristate_bool<'de, D>(de: D) -> Result<Option<Option<bool>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Called only when the JSON field is present. `null` deserialises to
+    // None (clear override), `true`/`false` to Some(value). The outer
+    // Some(...) marks "field present in payload" and survives `#[serde(
+    // default)]` providing None when the field is absent.
+    Option::<bool>::deserialize(de).map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +145,7 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         "i5": client.i5,
         "dns": client.dns,
         "serverEndpoint": client.server_endpoint,
+        "advancedSecurity": client.advanced_security,
         "enabled": client.enabled,
         "createdAt": client.created_at,
         "updatedAt": client.updated_at,
@@ -186,6 +208,24 @@ pub async fn create_client(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = require_auth(&jar, &state)?;
 
+    if body.name.is_empty() || body.name.len() > 256 {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Name must be 1-256 characters",
+        ));
+    }
+    if let Some(ref expires) = body.expires_at {
+        let ok = chrono::DateTime::parse_from_rfc3339(expires).is_ok()
+            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M").is_ok()
+            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M:%S").is_ok();
+        if !ok {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Invalid date format for expiresAt. Use ISO 8601 format.",
+            ));
+        }
+    }
+
     let iface = db::get_interface().map_err(map_err)?;
     let user_config = db::get_user_config().map_err(map_err)?;
 
@@ -242,6 +282,9 @@ pub async fn create_client(
         i5: None,
         dns: Some(user_config.default_dns.clone()),
         server_endpoint: None,
+        // Pure AmneziaWG deployment → opt every new peer in by default.
+        // Operator can flip to off (or null for auto-detect) per-client.
+        advanced_security: Some(true),
         enabled: true,
     };
 
@@ -333,6 +376,24 @@ pub async fn update_client(
             return Err(api_err(StatusCode::BAD_REQUEST, "Jc must be >= Jmin"));
         }
     }
+
+    // Validate I1-I5 CPS tag grammar.
+    for (label, val) in [
+        ("i1", &body.i1),
+        ("i2", &body.i2),
+        ("i3", &body.i3),
+        ("i4", &body.i4),
+        ("i5", &body.i5),
+    ] {
+        if let Some(s) = val {
+            if let Err(msg) = crate::wg::params::validate_init_spec(s) {
+                return Err(api_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid {}: {msg}", label.to_uppercase()),
+                ));
+            }
+        }
+    }
     if let Some(ref expires) = body.expires_at {
         // Try RFC3339 first, then ISO 8601 without timezone
         let is_valid_date = chrono::DateTime::parse_from_rfc3339(expires).is_ok()
@@ -347,8 +408,81 @@ pub async fn update_client(
     let client = db::get_client(client_id).map_err(|_| {
         api_err(StatusCode::NOT_FOUND, "Client not found")
     })?;
-    if user.role == 0 && client.user_id != Some(user.id) {
+    let is_admin = user.role >= 1;
+    if !is_admin && client.user_id != Some(user.id) {
         return Err(api_err(StatusCode::FORBIDDEN, "Access denied"));
+    }
+
+    // Bound the name length to prevent unbounded storage growth.
+    if let Some(ref n) = body.name {
+        if n.is_empty() || n.len() > 256 {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Name must be 1-256 characters",
+            ));
+        }
+    }
+
+    // Privilege escalation guard: only admins may change addressing,
+    // routing, or interface-level fields. A non-admin must not be able to
+    // self-assign an arbitrary IP, change AllowedIPs, override DNS, or
+    // attach interface-level hooks to their downloaded config.
+    if !is_admin {
+        let admin_only = [
+            (body.ipv4_address.is_some(), "ipv4Address"),
+            (body.ipv6_address.is_some(), "ipv6Address"),
+            (body.allowed_ips.is_some(), "allowedIps"),
+            (body.firewall_ips.is_some(), "firewallIps"),
+            (body.dns.is_some(), "dns"),
+            (body.mtu.is_some(), "mtu"),
+            (body.persistent_keepalive.is_some(), "persistentKeepalive"),
+            (body.j_c.is_some(), "jC"),
+            (body.j_min.is_some(), "jMin"),
+            (body.j_max.is_some(), "jMax"),
+            (body.i1.is_some(), "i1"),
+            (body.i2.is_some(), "i2"),
+            (body.i3.is_some(), "i3"),
+            (body.i4.is_some(), "i4"),
+            (body.i5.is_some(), "i5"),
+            (body.pre_up.is_some(), "preUp"),
+            (body.post_up.is_some(), "postUp"),
+            (body.pre_down.is_some(), "preDown"),
+            (body.post_down.is_some(), "postDown"),
+            (body.server_endpoint.is_some(), "serverEndpoint"),
+            (body.advanced_security.is_some(), "advancedSecurity"),
+        ];
+        if let Some((_, field)) = admin_only.iter().find(|(present, _)| *present) {
+            return Err(api_err(
+                StatusCode::FORBIDDEN,
+                &format!("Field '{field}' may only be changed by an admin"),
+            ));
+        }
+    }
+
+    // Validate that any new IP address is a real address inside the
+    // configured interface CIDR. This blocks privilege escalation via IP
+    // self-assignment to gateways or out-of-range targets.
+    let iface_for_validation = db::get_interface().map_err(map_err)?;
+    if let Some(ref v) = body.ipv4_address {
+        if v.parse::<std::net::Ipv4Addr>().is_err()
+            || !db::ip_in_cidr(v, &iface_for_validation.ipv4_cidr)
+        {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "ipv4Address must be a valid IPv4 address inside the interface CIDR",
+            ));
+        }
+    }
+    if let Some(ref v) = body.ipv6_address {
+        if !v.is_empty()
+            && (v.parse::<std::net::Ipv6Addr>().is_err()
+                || !db::ip_in_cidr(v, &iface_for_validation.ipv6_cidr))
+        {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "ipv6Address must be a valid IPv6 address inside the interface CIDR",
+            ));
+        }
     }
 
     let mut fields = db::UpdateMap::new();
@@ -375,12 +509,29 @@ pub async fn update_client(
     if let Some(ref v) = body.i3 { fields.insert("i3".into(), v.clone()); }
     if let Some(ref v) = body.i4 { fields.insert("i4".into(), v.clone()); }
     if let Some(ref v) = body.i5 { fields.insert("i5".into(), v.clone()); }
+    // Tri-state mapping for AdvancedSecurity:
+    //   Some(Some(v)) → write 1/0 via the generic UPDATE
+    //   Some(None)    → write SQL NULL (clears override → kernel auto-detect)
+    //   None          → leave the column untouched
+    //
+    // The generic UPDATE helper takes string values, so only the
+    // Some(Some(_)) case routes through it. The null branch goes through a
+    // dedicated helper that emits a NULL literal.
+    let null_advanced_security = matches!(body.advanced_security, Some(None));
+    if let Some(Some(b)) = body.advanced_security {
+        fields.insert("advanced_security".into(), if b { "1".into() } else { "0".into() });
+    }
 
-    if fields.is_empty() {
+    if fields.is_empty() && !null_advanced_security {
         return Err(api_err(StatusCode::BAD_REQUEST, "No fields to update"));
     }
 
-    db::update_client(client_id, &fields).map_err(map_err)?;
+    if !fields.is_empty() {
+        db::update_client(client_id, &fields).map_err(map_err)?;
+    }
+    if null_advanced_security {
+        db::set_client_advanced_security(client_id, None).map_err(map_err)?;
+    }
     wg::save_config().map_err(map_err)?;
 
     // Rebuild firewall if enabled
@@ -594,7 +745,8 @@ pub async fn generate_one_time_link(
 // ---------------------------------------------------------------------------
 
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let s: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 c
@@ -602,5 +754,13 @@ fn sanitize_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    // Strip any leading dots so we never produce names like `.` or `.htaccess`,
+    // and fall back to a fixed value when the input collapses to empty.
+    let s = s.trim_start_matches('.').to_string();
+    if s.is_empty() {
+        "client".to_string()
+    } else {
+        s
+    }
 }

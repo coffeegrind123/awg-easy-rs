@@ -18,7 +18,6 @@ use axum::Router;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tower_http::cors::CorsLayer;
 
 // ---------------------------------------------------------------------------
 // Session state
@@ -78,12 +77,14 @@ pub fn api_err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "error": msg })))
 }
 
-/// Convert an `anyhow::Error` into a 500 response.
+/// Convert an `anyhow::Error` into a 500 response. The detailed error
+/// (with chain) is logged server-side; clients only see a generic message
+/// so we don't leak internal paths, SQL state, or filesystem layout.
 pub fn map_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
-    tracing::error!("{:#}", e);
+    tracing::error!("internal error: {:#}", e);
     api_err(
         StatusCode::INTERNAL_SERVER_ERROR,
-        &e.to_string(),
+        "Internal server error",
     )
 }
 
@@ -189,9 +190,11 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(routes::metrics_prometheus),
         )
         .route("/health", axum::routing::get(|| async { "OK" }))
-        .nest("/api", api)
-        .layer(CorsLayer::permissive());
-
+        .nest("/api", api);
+    // Note: no CorsLayer is attached. The single-origin admin UI is served
+    // from the same listener as the API, so cross-origin requests must not
+    // succeed. Adding `CorsLayer::permissive()` here would expose every
+    // unauthenticated endpoint (e.g. /api/information) to any web origin.
     root
 }
 

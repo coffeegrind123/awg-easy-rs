@@ -139,7 +139,9 @@ async fn login_disabled_user() {
     let app = router();
     let (status, body, _) = login(&app, "disabled", "pass", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"], "User is disabled");
+    // Disabled users return the same generic message as wrong-password to
+    // avoid leaking account state. Just assert that the request was denied.
+    assert_eq!(body["error"], "Invalid username or password");
 }
 
 #[tokio::test]
@@ -346,10 +348,11 @@ async fn login_with_invalid_totp_code() {
     db::create_user(&db::CreateUserParams {
         username: "totpuser".into(),
         password: hash,
+        // 32-char base32 = 20 bytes = SHA-1 RFC 6238 minimum.
         email: None,
         name: "TOTP".into(),
         role: 0,
-        totp_key: Some("JBSWY3DPEHPK3PXP".into()),
+        totp_key: Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".into()),
         totp_verified: true,
         enabled: true,
     })

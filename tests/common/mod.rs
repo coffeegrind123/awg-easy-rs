@@ -14,4 +14,5 @@ pub fn seed() {
 
     awg_easy_rs::db::init_test_db();
     awg_easy_rs::api::session::reset_login_attempts();
+    awg_easy_rs::api::session::reset_totp_attempts();
 }

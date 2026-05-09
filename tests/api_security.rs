@@ -86,6 +86,7 @@ fn create_client(user_id: Option<i64>, name: &str, ip: &str) -> i64 {
         i1: None, i2: None, i3: None, i4: None, i5: None,
         dns: Some(r#"["1.1.1.1"]"#.into()),
         server_endpoint: None,
+        advanced_security: Some(true),
         enabled: true,
     })
     .unwrap()
@@ -709,4 +710,837 @@ async fn login_with_malformed_json() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert!(!resp.status().is_success());
+}
+
+// ---------------------------------------------------------------------------
+// Privilege escalation regression tests (the IP-self-assignment family)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn non_admin_cannot_change_own_ipv4_address() {
+    seed();
+    let user_id = create_user("alice", "passpass", 0);
+    let client_id = create_client(Some(user_id), "alice-c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "alice", "passpass").await;
+
+    // Attempt to hijack the gateway address.
+    let body = json!({ "ipv4Address": "10.8.0.1" });
+    let (status, resp) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(resp["error"].as_str().unwrap().contains("admin"));
+
+    // The DB row must not have been modified.
+    let client = db::get_client(client_id).unwrap();
+    assert_eq!(client.ipv4_address.as_deref(), Some("10.8.0.10"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn non_admin_cannot_change_allowed_ips() {
+    seed();
+    let user_id = create_user("bob", "passpass", 0);
+    let client_id = create_client(Some(user_id), "bob-c", "10.8.0.20");
+    let app = router();
+    let cookie = login_get_cookie(&app, "bob", "passpass").await;
+
+    let body = json!({ "allowedIps": ["1.2.3.4/32"] });
+    let (status, _) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn non_admin_cannot_change_dns_or_mtu() {
+    seed();
+    let user_id = create_user("carol", "passpass", 0);
+    let client_id = create_client(Some(user_id), "carol-c", "10.8.0.30");
+    let app = router();
+    let cookie = login_get_cookie(&app, "carol", "passpass").await;
+
+    let body = json!({ "mtu": 1380 });
+    let (status, _) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_ipv4_must_be_inside_cidr() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let client_id = create_client(Some(admin_id), "c1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // 1.2.3.4 is outside the seeded 10.8.0.0/24 interface CIDR.
+    let body = json!({ "ipv4Address": "1.2.3.4" });
+    let (status, resp) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().contains("inside"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_ipv4_inside_cidr_accepted() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let client_id = create_client(Some(admin_id), "c1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "ipv4Address": "10.8.0.50" });
+    let (status, _) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let client = db::get_client(client_id).unwrap();
+    assert_eq!(client.ipv4_address.as_deref(), Some("10.8.0.50"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn create_client_rejects_oversized_name() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+    let huge = "a".repeat(257);
+    let body = json!({ "name": huge });
+    let (status, _) = post(&app, "/api/client", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn create_client_rejects_empty_name() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+    let body = json!({ "name": "" });
+    let (status, _) = post(&app, "/api/client", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Username enumeration timing — both branches should look identical to a
+// caller. We can't measure wall-clock here reliably, but we can at least
+// confirm the response body is identical for missing-user vs wrong-password.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn login_missing_and_wrong_password_return_same_error() {
+    seed();
+    create_user("real_user", "realpass1234", 0);
+    let app = router();
+
+    // Wrong password for an existing user.
+    let body1 = json!({ "username": "real_user", "password": "wrong" });
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body1).unwrap()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    let status1 = resp1.status();
+    let body1_bytes = axum::body::to_bytes(resp1.into_body(), 65536).await.unwrap();
+    let body1_v: Value = serde_json::from_slice(&body1_bytes).unwrap();
+
+    // Non-existent user.
+    let body2 = json!({ "username": "ghost_user", "password": "wrong" });
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body2).unwrap()))
+        .unwrap();
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    let status2 = resp2.status();
+    let body2_bytes = axum::body::to_bytes(resp2.into_body(), 65536).await.unwrap();
+    let body2_v: Value = serde_json::from_slice(&body2_bytes).unwrap();
+
+    assert_eq!(status1, StatusCode::UNAUTHORIZED);
+    assert_eq!(status2, StatusCode::UNAUTHORIZED);
+    assert_eq!(body1_v["error"], body2_v["error"]);
+}
+
+// ---------------------------------------------------------------------------
+// Generic-fields removed from /api/admin/general POST
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_general_post_ignores_unknown_fields() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // Malicious request: try to reset the setup wizard and unset the
+    // session password. Both fields should be silently ignored — only the
+    // explicit whitelist (sessionTimeout / metricsPrometheus / metricsJson /
+    // metricsPassword) is honoured.
+    let body = json!({
+        "setupStep": 1,
+        "sessionPassword": "evilevileveileveileveileveil",
+        "sessionTimeout": 7200
+    });
+    let (status, _) = post(&app, "/api/admin/general", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let general = db::get_general().unwrap();
+    assert_eq!(general.session_timeout, 7200);
+    // Setup step must be unchanged from its seeded default of 1 (we didn't
+    // touch it through this endpoint), and session_password must not have
+    // been replaced by the attacker-supplied value.
+    assert_ne!(general.session_password, "evilevileveileveileveileveil");
+}
+
+// ---------------------------------------------------------------------------
+// /api/setup/4 GET should require admin once setup is complete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn setup4_get_requires_admin_after_setup() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    db::set_setup_step(0).unwrap(); // setup complete
+
+    let app = router();
+
+    // Unauthenticated — must be denied.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/setup/4")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Non-admin — must be denied.
+    create_user("plain", "plainpass1", 0);
+    let cookie = login_get_cookie(&app, "plain", "plainpass1").await;
+    let (status, _) = get_req(&app, "/api/setup/4", &cookie).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Admin — allowed.
+    let admin_cookie = login_get_cookie(&app, "admin", "adminpass").await;
+    let (status, _) = get_req(&app, "/api/setup/4", &admin_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Server-generated TOTP setup flow
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn totp_setup_returns_server_generated_secret() {
+    seed();
+    create_user("alice", "passpass", 0);
+    let app = router();
+    let cookie = login_get_cookie(&app, "alice", "passpass").await;
+
+    let body = json!({ "type": "setup" });
+    let (status, resp) = post(&app, "/api/me/totp", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["type"], "setup");
+
+    let key = resp["key"].as_str().unwrap();
+    let uri = resp["uri"].as_str().unwrap();
+    // RFC 6238 / 4648: 32-char base32 = 20 bytes.
+    assert_eq!(key.len(), 32);
+    assert!(uri.starts_with("otpauth://totp/"));
+    assert!(uri.contains(&format!("secret={key}")));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn totp_create_rejects_bad_code() {
+    seed();
+    let user_id = create_user("bob", "passpass", 0);
+    let app = router();
+    let cookie = login_get_cookie(&app, "bob", "passpass").await;
+
+    // Run setup so the user has a stored secret.
+    let _ = post(&app, "/api/me/totp", &cookie, &json!({"type": "setup"})).await;
+
+    // Burn one attempt with a code that is guaranteed to not match.
+    let body = json!({ "type": "create", "code": "000000" });
+    let (status, _) = post(&app, "/api/me/totp", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The user row should still have totp_verified=0.
+    let u = db::get_user(user_id).unwrap();
+    assert!(!u.totp_verified);
+    assert!(u.totp_key.as_deref().map(|s| !s.is_empty()).unwrap_or(false));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn totp_delete_requires_current_password() {
+    seed();
+    let user_id = create_user("carol", "rightpass", 0);
+    let app = router();
+    let cookie = login_get_cookie(&app, "carol", "rightpass").await;
+
+    let _ = post(&app, "/api/me/totp", &cookie, &json!({"type": "setup"})).await;
+
+    // Wrong password
+    let body = json!({ "type": "delete", "currentPassword": "wrong" });
+    let (status, _) = post(&app, "/api/me/totp", &cookie, &body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Right password
+    let body = json!({ "type": "delete", "currentPassword": "rightpass" });
+    let (status, _) = post(&app, "/api/me/totp", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let u = db::get_user(user_id).unwrap();
+    assert!(u.totp_key.as_deref().map(|s| s.is_empty()).unwrap_or(true));
+}
+
+// ---------------------------------------------------------------------------
+// Metrics password gating
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn metrics_json_requires_bearer_when_password_set() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // Enable JSON metrics + set a password.
+    let body = json!({ "metricsJson": true, "metricsPassword": "secrettoken" });
+    let (status, _) = post(&app, "/api/admin/general", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // No Authorization header — must fail.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/metrics/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Wrong bearer — must fail.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/metrics/json")
+        .header(header::AUTHORIZATION, "Bearer wrong")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct bearer — must succeed.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/metrics/json")
+        .header(header::AUTHORIZATION, "Bearer secrettoken")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_general_get_does_not_leak_metrics_password() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let _ = post(
+        &app,
+        "/api/admin/general",
+        &cookie,
+        &json!({ "metricsPassword": "supersecret" }),
+    )
+    .await;
+
+    let (status, body) = get_req(&app, "/api/admin/general", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    // Endpoint must surface a boolean only — never the value or its hash.
+    assert!(body["metricsPassword"].is_null());
+    assert_eq!(body["metricsPasswordSet"], json!(true));
+    let serialised = body.to_string();
+    assert!(!serialised.contains("supersecret"));
+}
+
+// ---------------------------------------------------------------------------
+// Migrate endpoint accepts a v3-format backup file
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn setup_migrate_imports_legacy_clients() {
+    seed();
+    // Setup is incomplete — migrate is publicly callable.
+    db::set_setup_step(2).unwrap();
+    let app = router();
+
+    let payload = serde_json::json!({
+        "server": {
+            "privateKey": "PRIV-from-v3",
+            "publicKey":  "PUB-from-v3",
+            "address":    "10.7.0.1"
+        },
+        "clients": {
+            "abc": {
+                "name": "imported-client",
+                "address": "10.7.0.2",
+                "privateKey": "client-priv",
+                "publicKey": "client-pub",
+                "preSharedKey": "client-psk",
+                "createdAt": "2024-01-01T00:00:00Z",
+                "updatedAt": "2024-01-01T00:00:00Z",
+                "enabled": true
+            }
+        }
+    });
+    let body = json!({ "file": serde_json::to_string(&payload).unwrap() });
+
+    // No cookie required during setup.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/setup/migrate")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let clients = db::get_all_clients().unwrap();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].name, "imported-client");
+    assert_eq!(clients[0].ipv4_address.as_deref(), Some("10.7.0.2"));
+    assert_eq!(clients[0].public_key, "client-pub");
+
+    let iface = db::get_interface().unwrap();
+    assert_eq!(iface.private_key, "PRIV-from-v3");
+    assert_eq!(iface.public_key, "PUB-from-v3");
+    assert_eq!(iface.ipv4_cidr, "10.7.0.0/24");
+
+    // Setup is now complete.
+    assert_eq!(db::get_setup_step().unwrap(), 0);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn setup_migrate_rejects_invalid_json_payload() {
+    seed();
+    db::set_setup_step(2).unwrap();
+    let app = router();
+
+    let body = json!({ "file": "{not-valid-json" });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/setup/migrate")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// AmneziaWG 2.0 spec compliance
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_rejects_invalid_i1_tag() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // Garbage outside any tag delimiters.
+    let body = json!({ "i1": "this is not a tag spec" });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().to_lowercase().contains("invalid i1"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_rejects_oversize_random_count() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "i2": "<r 5000>" });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_accepts_full_tag_grammar() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({
+        "i1": "<r 2><b 0xdeadbeef><t><c><rc 16><rd 4>"
+    });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_validates_s3_bound() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "s3": 10000 });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().contains("S3"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_validates_s4_bound() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "s4": 100 });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().contains("S4"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_caps_jmax_at_1279() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // 1280 must now be rejected (spec: Jmax < 1280)
+    let body = json!({ "jMax": 1280, "jMin": 10 });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().contains("Jmax"));
+
+    // 1279 must succeed
+    let body = json!({ "jMax": 1279, "jMin": 10 });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_drops_j1_j2_j3_itime_on_post() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // These keys are no longer accepted — the request still succeeds (we
+    // silently drop them) but the DB row must remain at its seeded default.
+    let body = json!({
+        "j1": "junk-j1",
+        "j2": "junk-j2",
+        "j3": "junk-j3",
+        "itime": 42
+    });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let iface = db::get_interface().unwrap();
+    assert!(iface.j1.is_empty());
+    assert!(iface.j2.is_empty());
+    assert!(iface.j3.is_empty());
+    assert_eq!(iface.itime, 0);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_get_does_not_surface_j_fields() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let (status, body) = get_req(&app, "/api/admin/interface", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("j1").is_none(), "j1 must not be exposed via GET");
+    assert!(body.get("j2").is_none(), "j2 must not be exposed via GET");
+    assert!(body.get("j3").is_none(), "j3 must not be exposed via GET");
+    assert!(body.get("itime").is_none(), "itime must not be exposed via GET");
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn client_update_validates_i1_tag_grammar() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let client_id = create_client(Some(admin_id), "c1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "i1": "garbage" });
+    let (status, resp) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().to_lowercase().contains("invalid i1"));
+
+    // Valid tag spec passes.
+    let body = json!({ "i1": "<r 4><b 0xcafe><t>" });
+    let (status, _) = post(
+        &app,
+        &format!("/api/client/{client_id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_interface_rejects_jmax_equal_jmin_when_jc_set() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // Kernel post-config check: when Jc != 0, Jmax must be > Jmin.
+    let body = json!({ "jC": 5, "jMin": 50, "jMax": 50 });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().to_lowercase().contains("jmax"));
+
+    // jC=0 (junk packets disabled) — equal Jmax/Jmin should be accepted
+    // because the kernel never enters the junk-generation path.
+    let body = json!({ "jC": 0, "jMin": 50, "jMax": 50 });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn init_spec_rejects_oversize_total_packet() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // 100 random tags of 1000 bytes each = 100KB → blows past
+    // MESSAGE_MAX_SIZE = 65535 and must be rejected.
+    let mut spec = String::new();
+    for _ in 0..100 {
+        spec.push_str("<r 1000>");
+    }
+    let body = json!({ "i1": spec });
+    let (status, resp) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(resp["error"].as_str().unwrap().to_lowercase().contains("i1"));
+}
+
+// ---------------------------------------------------------------------------
+// AdvancedSecurity per-peer flag
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn new_client_defaults_to_advanced_security_on() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "name": "fresh-peer" });
+    let (status, resp) = post(&app, "/api/client", &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let id = resp["clientId"].as_i64().unwrap();
+    let c = db::get_client(id).unwrap();
+    assert_eq!(c.advanced_security, Some(true));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_can_toggle_advanced_security_off() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "p1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "advancedSecurity": false });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(db::get_client(cid).unwrap().advanced_security, Some(false));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_can_set_advanced_security_to_null() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "p1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // Explicit JSON null clears the column → kernel auto-detect.
+    let body = json!({ "advancedSecurity": Value::Null });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(db::get_client(cid).unwrap().advanced_security, None);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn non_admin_cannot_change_advanced_security() {
+    seed();
+    let user_id = create_user("alice", "passpass", 0);
+    let cid = create_client(Some(user_id), "alice-c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "alice", "passpass").await;
+
+    let body = json!({ "advancedSecurity": false });
+    let (status, resp) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(resp["error"].as_str().unwrap().contains("admin"));
+    // Untouched.
+    assert_eq!(db::get_client(cid).unwrap().advanced_security, Some(true));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn admin_get_returns_advanced_security_field() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "p1", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let (status, body) = get_req(&app, &format!("/api/client/{cid}"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["advancedSecurity"], json!(true));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn server_config_emits_advanced_security_for_each_peer() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid_on = create_client(Some(admin_id), "peer-on", "10.8.0.10");
+    let cid_off = create_client(Some(admin_id), "peer-off", "10.8.0.11");
+    db::set_client_advanced_security(cid_off, Some(false)).unwrap();
+    let cid_auto = create_client(Some(admin_id), "peer-auto", "10.8.0.12");
+    db::set_client_advanced_security(cid_auto, None).unwrap();
+
+    let iface = db::get_interface().unwrap();
+    let hooks = db::get_hooks().unwrap();
+    let mut server_cfg =
+        awg_easy_rs::wg::config_gen::generate_server_interface(&iface, &hooks).unwrap();
+    for client in db::get_all_clients().unwrap() {
+        if client.enabled {
+            server_cfg.push_str("\n\n");
+            server_cfg.push_str(
+                &awg_easy_rs::wg::config_gen::generate_server_peer(&client).unwrap(),
+            );
+        }
+    }
+    // peer-on: explicit On
+    assert!(
+        server_cfg.contains(&format!("# Client: peer-on ({cid_on})\n[Peer]"))
+            && extract_block(&server_cfg, cid_on).contains("AdvancedSecurity = on"),
+        "expected AdvancedSecurity = on for peer-on"
+    );
+    // peer-off: explicit Off
+    assert!(
+        extract_block(&server_cfg, cid_off).contains("AdvancedSecurity = off"),
+        "expected AdvancedSecurity = off for peer-off"
+    );
+    // peer-auto: line must be omitted entirely
+    assert!(
+        !extract_block(&server_cfg, cid_auto).contains("AdvancedSecurity"),
+        "expected no AdvancedSecurity line for peer-auto"
+    );
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn client_config_always_marks_server_as_advanced() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "p1", "10.8.0.10");
+
+    let iface = db::get_interface().unwrap();
+    let uc = db::get_user_config().unwrap();
+    let c = db::get_client(cid).unwrap();
+    let cfg = awg_easy_rs::wg::config_gen::generate_client_config(&iface, &uc, &c).unwrap();
+    // Pure-AmneziaWG: client-side [Peer] always marks the server as
+    // advanced (default-on, kernel auto-detect would also work but we
+    // make it explicit).
+    assert!(cfg.contains("AdvancedSecurity = on"), "client config: {cfg}");
+}
+
+// Helper for the server-config emit test above. Pulls the [Peer] block
+// belonging to the client with the given id.
+fn extract_block(server_cfg: &str, id: i64) -> String {
+    let header = format!("# Client: ");
+    let id_marker = format!("({id})");
+    let mut iter = server_cfg.split("\n\n");
+    while let Some(block) = iter.next() {
+        if block.starts_with(&header) && block.contains(&id_marker) {
+            return block.to_string();
+        }
+    }
+    String::new()
 }

@@ -57,9 +57,12 @@ RUN mkdir -p /etc/amnezia && ln -s /etc/wireguard /etc/amnezia/amneziawg
 # Copy the Rust binary
 COPY --from=builder /build/target/release/awg-easy-rs /usr/local/bin/awg-easy-rs
 
-# Health check
+# Health check — verifies the web UI binary is responding. We deliberately
+# don't probe `awg show` here because a misconfigured WireGuard interface
+# should surface in the UI / metrics rather than make the container
+# unhealthy and start a restart loop.
 HEALTHCHECK --interval=1m --timeout=5s --retries=3 \
-    CMD /usr/bin/timeout 5s /bin/sh -c "/usr/bin/awg show | /bin/grep -q interface || exit 1"
+    CMD /usr/bin/curl -fsS http://127.0.0.1:${PORT:-51821}/health || exit 1
 
 ENV PORT=51821
 ENV HOST=0.0.0.0

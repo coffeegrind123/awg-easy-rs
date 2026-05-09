@@ -9,15 +9,43 @@ pub mod params;
 use anyhow::Result;
 
 /// Generate a new WireGuard keypair via `awg genkey` / `awg pubkey`.
+///
+/// Avoids shelling out via `bash -c` — uses Command stdin instead so the
+/// (already-validated) base64 private key never touches a shell parser.
 pub fn generate_keypair() -> Result<(String, String)> {
-    let private = cli::exec("awg genkey")?;
-    let public = cli::exec(&format!("echo {} | awg pubkey", private))?;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if !cfg!(target_os = "linux") {
+        return Ok((String::new(), String::new()));
+    }
+    let private = cli::run("awg", &["genkey"])?;
+    if private.is_empty() {
+        return Ok((private, String::new()));
+    }
+    let mut child = Command::new("awg")
+        .arg("pubkey")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut sin) = child.stdin.take() {
+        sin.write_all(private.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(anyhow::anyhow!(
+            "awg pubkey failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let public = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok((private, public))
 }
 
 /// Generate a new pre-shared key.
 pub fn generate_psk() -> Result<String> {
-    cli::exec("awg genpsk")
+    cli::run("awg", &["genpsk"])
 }
 
 /// Full WireGuard startup sequence.

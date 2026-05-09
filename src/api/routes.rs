@@ -9,13 +9,44 @@
 //! | GET    | /api/interface        | Interface public info     |
 
 use axum::extract::Path;
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 
 use super::{api_err, map_err};
-use crate::{db, wg};
+use crate::{auth, db, wg};
+
+/// Constant-time string equality for short tokens.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Validate the incoming Authorization header against the stored metrics
+/// password. The password is stored hashed (sha-256 hex) — see `update_general`.
+fn check_metrics_password(headers: &HeaderMap, stored_hash: &str) -> bool {
+    if stored_hash.is_empty() {
+        return true;
+    }
+    let auth = match headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        Some(s) => s,
+        None => return false,
+    };
+    let token = if let Some(rest) = auth.strip_prefix("Bearer ") {
+        rest.trim().to_string()
+    } else {
+        return false;
+    };
+    let supplied_hash = auth::sha256(&token);
+    constant_time_eq(supplied_hash.as_bytes(), stored_hash.as_bytes())
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/information
@@ -99,15 +130,20 @@ pub async fn one_time_link(
 // GET /metrics/json
 // ---------------------------------------------------------------------------
 
-pub async fn metrics_json() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub async fn metrics_json(
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let general = db::get_general().map_err(map_err)?;
 
     if !general.metrics_json {
         return Err(api_err(StatusCode::FORBIDDEN, "JSON metrics disabled"));
     }
 
-    // Optional metrics password check via query param
-    // (simplified: public if no password set)
+    if let Some(ref hash) = general.metrics_password {
+        if !check_metrics_password(&headers, hash) {
+            return Err(api_err(StatusCode::UNAUTHORIZED, "Bearer token required"));
+        }
+    }
 
     let iface = db::get_interface().map_err(map_err)?;
     let clients = db::get_all_clients().map_err(map_err)?;
@@ -145,7 +181,9 @@ pub async fn metrics_json() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
 // GET /metrics/prometheus
 // ---------------------------------------------------------------------------
 
-pub async fn metrics_prometheus() -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
+pub async fn metrics_prometheus(
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let general = db::get_general().map_err(map_err)?;
 
     if !general.metrics_prometheus {
@@ -153,6 +191,12 @@ pub async fn metrics_prometheus() -> Result<impl IntoResponse, (StatusCode, Json
             StatusCode::FORBIDDEN,
             "Prometheus metrics disabled",
         ));
+    }
+
+    if let Some(ref hash) = general.metrics_password {
+        if !check_metrics_password(&headers, hash) {
+            return Err(api_err(StatusCode::UNAUTHORIZED, "Bearer token required"));
+        }
     }
 
     let iface = db::get_interface().map_err(map_err)?;
@@ -234,7 +278,8 @@ pub async fn metrics_prometheus() -> Result<impl IntoResponse, (StatusCode, Json
 // ---------------------------------------------------------------------------
 
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let s: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 c
@@ -242,5 +287,11 @@ fn sanitize_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    let s = s.trim_start_matches('.').to_string();
+    if s.is_empty() {
+        "client".to_string()
+    } else {
+        s
+    }
 }
