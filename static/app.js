@@ -745,7 +745,7 @@ async function loadClientEdit(id) {
       <div class="danger-zone" style="margin-top:18px">
         <div class="danger-zone-text">
           <b>Delete peer</b>
-          <span>Removes <span class="mono">${esc(c.name || '')}</span> from <span class="mono">wg0</span>, revokes its keys, and frees the address. Cannot be undone.</span>
+          <span>Removes <span class="mono">${esc(c.name || '')}</span> from <span class="mono">awg0</span>, revokes its keys, and frees the address. Cannot be undone.</span>
         </div>
         <button class="btn btn--danger" onclick="confirmDelete(${id}, '${escJs(c.name || '')}')"><svg><use href="#i-trash"/></svg> Delete peer</button>
       </div>
@@ -1132,7 +1132,7 @@ async function showAdminTab(tab, e) {
           <div class="save-bar">
             <span class="changed">Changes need a restart</span>
             <div class="save-bar-spacer"></div>
-            <button type="button" class="btn btn--ghost" onclick="restartWG()"><svg><use href="#i-refresh"/></svg> Restart wg0</button>
+            <button type="button" class="btn btn--ghost" onclick="restartWG()"><svg><use href="#i-refresh"/></svg> Restart awg0</button>
             <button type="submit" class="btn btn--primary">Save changes</button>
           </div>
         </form>`;

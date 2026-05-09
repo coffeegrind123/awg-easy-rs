@@ -1,4 +1,4 @@
-//! WireGuard/AmneziaWG orchestration module.
+//! AmneziaWG/AmneziaWG orchestration module.
 //!
 //! Pure AmneziaWG — binary is always `awg`/`awg-quick`.
 
@@ -8,7 +8,7 @@ pub mod params;
 
 use anyhow::Result;
 
-/// Generate a new WireGuard keypair via `awg genkey` / `awg pubkey`.
+/// Generate a new AmneziaWG keypair via `awg genkey` / `awg pubkey`.
 ///
 /// Avoids shelling out via `bash -c` — uses Command stdin instead so the
 /// (already-validated) base64 private key never touches a shell parser.
@@ -48,14 +48,14 @@ pub fn generate_psk() -> Result<String> {
     cli::run("awg", &["genpsk"])
 }
 
-/// Full WireGuard startup sequence.
+/// Full AmneziaWG startup sequence.
 pub fn startup() -> Result<()> {
     let mut iface = crate::db::get_interface()?;
-    tracing::info!("Starting WireGuard interface {}", iface.name);
+    tracing::info!("Starting AmneziaWG interface {}", iface.name);
 
     // Generate keys if default placeholder
     if iface.private_key == "---default---" {
-        tracing::info!("Generating new WireGuard keypair...");
+        tracing::info!("Generating new AmneziaWG keypair...");
         let (priv_key, pub_key) = generate_keypair()?;
         crate::db::update_key_pair(&pub_key, &priv_key)?;
         iface = crate::db::get_interface()?;
@@ -80,11 +80,11 @@ pub fn startup() -> Result<()> {
         crate::firewall::rebuild_rules().ok();
     }
 
-    tracing::info!("WireGuard interface {} started successfully", iface.name);
+    tracing::info!("AmneziaWG interface {} started successfully", iface.name);
     Ok(())
 }
 
-/// Save WireGuard config to disk and sync to running interface.
+/// Save AmneziaWG config to disk and sync to running interface.
 pub fn save_config() -> Result<()> {
     let iface = crate::db::get_interface()?;
     let clients = crate::db::get_all_clients()?;
@@ -120,7 +120,7 @@ pub fn get_client_config(client_id: i64) -> Result<String> {
     config_gen::generate_client_config(&iface, &user_config, &client)
 }
 
-/// Dump running WireGuard status for all peers.
+/// Dump running AmneziaWG status for all peers.
 pub fn dump_peers(iface_name: &str) -> Result<Vec<cli::PeerDump>> {
     cli::awg_dump(iface_name)
 }
@@ -152,14 +152,14 @@ pub fn cron_job() -> Result<()> {
     Ok(())
 }
 
-/// Graceful shutdown — take down the WireGuard interface.
+/// Graceful shutdown — take down the AmneziaWG interface.
 pub fn shutdown() -> Result<()> {
     let iface = crate::db::get_interface()?;
     cli::awg_down(&iface.name).ok();
     Ok(())
 }
 
-/// Restart the WireGuard interface.
+/// Restart the AmneziaWG interface.
 pub fn restart() -> Result<()> {
     let iface = crate::db::get_interface()?;
     cli::awg_down(&iface.name).ok();

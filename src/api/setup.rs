@@ -275,7 +275,7 @@ pub async fn setup_migrate(
         used_v6.push(v6.clone());
         let params = db::CreateClientParams {
             user_id: None,
-            interface_id: Some("wg0".into()),
+            interface_id: Some("awg0".into()),
             name: client.name.clone(),
             ipv4_address: Some(client.address.clone()),
             ipv6_address: Some(v6),

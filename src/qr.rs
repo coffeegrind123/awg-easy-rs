@@ -1,4 +1,4 @@
-//! QR code generation for WireGuard client configuration files.
+//! QR code generation for AmneziaWG client configuration files.
 //!
 //! Uses the `qrcode` crate to produce SVG output suitable for embedding
 //! in the admin UI.

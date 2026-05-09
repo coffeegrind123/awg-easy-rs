@@ -6,7 +6,9 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
 <meta name="referrer" content="no-referrer">
 <title>AmneziaWG Easy</title>
-<link rel="icon" href="/favicon.png">
+<link rel="icon" type="image/svg+xml" href="/logo-amnezia.svg">
+<link rel="icon" type="image/x-icon" href="/favicon-amnezia.ico">
+<link rel="apple-touch-icon" href="/apple-touch-icon-amnezia.png">
 <style>
 :root {
   --bg-page: #050509;
@@ -94,14 +96,10 @@ a { color: inherit; }
 }
 .brand-mark {
   width: 28px; height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-lo) 100%);
-  display: grid; place-items: center;
-  color: #0b0b13;
-  font-weight: 700;
   flex-shrink: 0;
+  display: grid; place-items: center;
 }
-.brand-mark svg { width: 16px; height: 16px; }
+.brand-mark img, .brand-mark svg { width: 100%; height: 100%; display: block; }
 .brand-name { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
 .brand-name small { display: block; font-weight: 500; font-size: 11px; color: var(--fg-faint); letter-spacing: 0.04em; text-transform: uppercase; }
 
@@ -777,7 +775,7 @@ label { color: var(--fg-soft); }
 <div class="shell" id="app-shell">
   <aside class="aside">
     <a class="brand-row" href="#/" onclick="navigate('/')">
-      <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+      <div class="brand-mark"><img src="/logo-amnezia.svg" alt=""></div>
       <div class="brand-name">awg-easy<small>VPN manager</small></div>
     </a>
     <div class="nav-section" id="nav-links">
@@ -795,7 +793,7 @@ label { color: var(--fg-soft); }
     </div>
     <div class="aside-footer">
       <div class="server-card">
-        <div class="server-card-head"><span class="pulse-dot"></span> wg0 · <span id="side-status">online</span></div>
+        <div class="server-card-head"><span class="pulse-dot"></span> awg0 · <span id="side-status">online</span></div>
         <div class="server-card-meta">
           <span>peers</span> <b id="side-peer-active">— / —</b>
           <span>version</span> <b id="side-version">—</b>
@@ -914,7 +912,7 @@ label { color: var(--fg-soft); }
       <div class="top">
         <h1 class="page-title">Admin</h1>
         <div class="top-spacer"></div>
-        <button class="btn btn--ghost btn--sm" onclick="restartWG()" title="Restart wg0 interface"><svg><use href="#i-refresh"/></svg> Restart wg0</button>
+        <button class="btn btn--ghost btn--sm" onclick="restartWG()" title="Restart awg0 interface"><svg><use href="#i-refresh"/></svg> Restart awg0</button>
       </div>
       <div class="scroll" style="padding-top:16px">
         <div class="admin-shell">
@@ -941,11 +939,11 @@ label { color: var(--fg-soft); }
     <aside class="auth-side">
       <div class="auth-side-grid"></div>
       <div class="auth-side-mark">
-        <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+        <div class="brand-mark"><img src="/logo-amnezia.svg" alt=""></div>
         <div class="brand-name">awg-easy<small>AmneziaWG manager</small></div>
       </div>
       <div class="auth-side-spacer"></div>
-      <p class="auth-side-quote">An ordinary WireGuard endpoint. Until it isn't — <em>obfuscated handshakes</em>, junk packets, four magic header values rolled per-server. The kind of thing nobody finds twice.</p>
+      <p class="auth-side-quote">Tunnels that don't look like tunnels — <em>obfuscated handshakes</em>, junk packets, four magic header values rolled per-server. The kind of thing nobody finds twice.</p>
       <p class="auth-side-attr">— The point of AmneziaWG</p>
     </aside>
     <div class="auth-main">
@@ -990,7 +988,7 @@ label { color: var(--fg-soft); }
     <aside class="auth-side">
       <div class="auth-side-grid"></div>
       <div class="auth-side-mark">
-        <div class="brand-mark"><svg><use href="#i-shield"/></svg></div>
+        <div class="brand-mark"><img src="/logo-amnezia.svg" alt=""></div>
         <div class="brand-name">awg-easy<small>first-time setup</small></div>
       </div>
       <div class="auth-side-spacer"></div>
@@ -1112,7 +1110,7 @@ label { color: var(--fg-soft); }
 <div class="modal-overlay" id="modal-delete">
   <div class="modal">
     <h3>Delete peer</h3>
-    <p class="sub" style="margin-bottom:14px">This removes the peer from <span class="mono">wg0</span>, revokes its keys, and frees the address. Cannot be undone.</p>
+    <p class="sub" style="margin-bottom:14px">This removes the peer from <span class="mono">awg0</span>, revokes its keys, and frees the address. Cannot be undone.</p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button class="btn btn--ghost" onclick="closeModal('modal-delete')">Cancel</button>
       <button class="btn btn--danger" id="delete-confirm-btn"><svg><use href="#i-trash"/></svg> Delete peer</button>

@@ -1,6 +1,6 @@
 //! Shell command execution and awg CLI wrappers.
 //!
-//! All WireGuard/AmneziaWG commands go through this module.
+//! All AmneziaWG commands go through this module.
 //! Binary is always `awg` / `awg-quick`.
 //!
 //! We deliberately avoid `bash -c` for any command that takes a
@@ -65,7 +65,7 @@ fn run_argv(prog: &str, args: &[&str]) -> Result<String> {
 
 /// Validate an interface name — argv-style execution prevents shell
 /// injection, but a malformed name can still confuse `awg-quick`. Allow
-/// only the WireGuard-conventional pattern.
+/// only the AmneziaWG-conventional pattern.
 fn validate_iface_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 15 {
         return Err(anyhow!("Invalid interface name length"));
@@ -76,13 +76,13 @@ fn validate_iface_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bring up an AmneziaWG/WireGuard interface with awg-quick.
+/// Bring up an AmneziaWG interface with awg-quick.
 pub fn awg_up(name: &str) -> Result<()> {
     validate_iface_name(name)?;
     run_argv("awg-quick", &["up", name]).map(|_| ())
 }
 
-/// Take down an AmneziaWG/WireGuard interface with awg-quick.
+/// Take down an AmneziaWG interface with awg-quick.
 pub fn awg_down(name: &str) -> Result<()> {
     validate_iface_name(name)?;
     run_argv("awg-quick", &["down", name]).map(|_| ())
@@ -128,7 +128,7 @@ pub struct PeerDump {
     pub transfer_tx: i64,
 }
 
-/// Dump WireGuard/AmneziaWG peer status for an interface.
+/// Dump AmneziaWG peer status for an interface.
 /// Parses tab-separated output from `awg show <name> dump`.
 pub fn awg_dump(name: &str) -> Result<Vec<PeerDump>> {
     validate_iface_name(name)?;

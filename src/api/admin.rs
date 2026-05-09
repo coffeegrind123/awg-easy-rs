@@ -12,7 +12,7 @@
 //! | GET    | /api/admin/interface            | Get interface (no key)    |
 //! | POST   | /api/admin/interface            | Update interface          |
 //! | POST   | /api/admin/interface/cidr       | Change CIDR + reassign IPs|
-//! | POST   | /api/admin/interface/restart    | Restart WireGuard         |
+//! | POST   | /api/admin/interface/restart    | Restart AmneziaWG         |
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -585,7 +585,7 @@ pub async fn change_cidr(
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/admin/interface/restart — restart WireGuard
+// POST /api/admin/interface/restart — restart AmneziaWG
 // ---------------------------------------------------------------------------
 
 pub async fn restart_interface(

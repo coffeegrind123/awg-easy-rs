@@ -2,7 +2,7 @@
 //!
 //! All HTTP handlers are organised into sub-modules:
 //! - `session`  — authentication and session management
-//! - `clients`  — WireGuard client CRUD
+//! - `clients`  — AmneziaWG client CRUD
 //! - `admin`    — administrative endpoints (general, hooks, interface, etc.)
 //! - `setup`    — first-run setup wizard
 //! - `routes`   — miscellaneous routes (one-time links, metrics)

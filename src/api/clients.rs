@@ -1,4 +1,4 @@
-//! WireGuard client CRUD handlers.
+//! AmneziaWG client CRUD handlers.
 //!
 //! | Method | Route                                  | Description           |
 //! |--------|----------------------------------------|-----------------------|

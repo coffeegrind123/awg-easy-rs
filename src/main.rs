@@ -32,10 +32,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Err(e) = wg::startup() {
-        tracing::warn!("WireGuard startup failed (non-fatal): {e}");
-        tracing::warn!("Web UI will still be available. Fix WireGuard and use Restart from admin panel.");
+        tracing::warn!("AmneziaWG startup failed (non-fatal): {e}");
+        tracing::warn!("Web UI will still be available. Fix AmneziaWG and use Restart from admin panel.");
     } else {
-        tracing::info!("WireGuard started");
+        tracing::info!("AmneziaWG started");
     }
 
     // Start background cron job (every 60 seconds)

@@ -604,23 +604,23 @@ CREATE TABLE IF NOT EXISTS one_time_links_table (
 const POST_UP_TEMPLATE: &str = concat!(
     "iptables -t nat -A POSTROUTING -s {{ipv4Cidr}} -o {{device}} -j MASQUERADE;",
     " iptables -A INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " iptables -A FORWARD -i wg0 -j ACCEPT;",
-    " iptables -A FORWARD -o wg0 -j ACCEPT;",
+    " iptables -A FORWARD -i awg0 -j ACCEPT;",
+    " iptables -A FORWARD -o awg0 -j ACCEPT;",
     " ip6tables -t nat -A POSTROUTING -s {{ipv6Cidr}} -o {{device}} -j MASQUERADE;",
     " ip6tables -A INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " ip6tables -A FORWARD -i wg0 -j ACCEPT;",
-    " ip6tables -A FORWARD -o wg0 -j ACCEPT;",
+    " ip6tables -A FORWARD -i awg0 -j ACCEPT;",
+    " ip6tables -A FORWARD -o awg0 -j ACCEPT;",
 );
 
 const POST_DOWN_TEMPLATE: &str = concat!(
     "iptables -t nat -D POSTROUTING -s {{ipv4Cidr}} -o {{device}} -j MASQUERADE;",
     " iptables -D INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " iptables -D FORWARD -i wg0 -j ACCEPT;",
-    " iptables -D FORWARD -o wg0 -j ACCEPT;",
+    " iptables -D FORWARD -i awg0 -j ACCEPT;",
+    " iptables -D FORWARD -o awg0 -j ACCEPT;",
     " ip6tables -t nat -D POSTROUTING -s {{ipv6Cidr}} -o {{device}} -j MASQUERADE;",
     " ip6tables -D INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " ip6tables -D FORWARD -i wg0 -j ACCEPT;",
-    " ip6tables -D FORWARD -o wg0 -j ACCEPT;",
+    " ip6tables -D FORWARD -i awg0 -j ACCEPT;",
+    " ip6tables -D FORWARD -o awg0 -j ACCEPT;",
 );
 
 // ---------------------------------------------------------------------------
@@ -651,6 +651,33 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         )?;
         tracing::info!(
             "DB migration: added clients_table.advanced_security (per-peer AdvancedSecurity flag)"
+        );
+    }
+    // Rename the interface row from `wg0` (upstream awg-easy / wg-easy default)
+    // to `awg0` to match the AmneziaWG-native naming. Idempotent — only fires
+    // when an old `wg0` row is present and no `awg0` row exists yet.
+    let needs_rename: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM interfaces_table WHERE name = 'wg0') \
+             AND NOT EXISTS(SELECT 1 FROM interfaces_table WHERE name = 'awg0')",
+            [],
+            |r| r.get::<_, i64>(0).map(|v| v != 0),
+        )
+        .unwrap_or(false);
+    if needs_rename {
+        conn.execute_batch(
+            "UPDATE interfaces_table SET name = 'awg0' WHERE name = 'wg0';\
+             UPDATE hooks_table SET id = 'awg0' WHERE id = 'wg0';\
+             UPDATE user_configs_table SET id = 'awg0' WHERE id = 'wg0';\
+             UPDATE hooks_table SET \
+               post_up = REPLACE(post_up, 'wg0', 'awg0'), \
+               post_down = REPLACE(post_down, 'wg0', 'awg0'), \
+               pre_up = REPLACE(pre_up, 'wg0', 'awg0'), \
+               pre_down = REPLACE(pre_down, 'wg0', 'awg0') \
+             WHERE id = 'awg0';",
+        )?;
+        tracing::info!(
+            "DB migration: renamed interface wg0 -> awg0 (interfaces_table, hooks_table, user_configs_table)"
         );
     }
     Ok(())
@@ -689,7 +716,7 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
          (name, device, port, private_key, public_key, ipv4_cidr, ipv6_cidr, mtu, enabled) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
-            "wg0",
+            "awg0",
             "eth0",
             51820,
             "---default---",
@@ -714,7 +741,7 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO hooks_table \
          (id, pre_up, post_up, pre_down, post_down) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params!["wg0", "", POST_UP_TEMPLATE, "", POST_DOWN_TEMPLATE],
+        params!["awg0", "", POST_UP_TEMPLATE, "", POST_DOWN_TEMPLATE],
     )?;
 
     // user_configs_table default
@@ -723,7 +750,7 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
          (id, default_mtu, default_persistent_keepalive, default_dns, default_allowed_ips, host, port) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            "wg0",
+            "awg0",
             1420,
             0,
             r#"["1.1.1.1","2606:4700:4700::1111"]"#,
@@ -845,7 +872,7 @@ pub fn get_interface() -> Result<Interface> {
     let c = conn();
     let iface = c
         .query_row(
-            "SELECT * FROM interfaces_table WHERE name = 'wg0'",
+            "SELECT * FROM interfaces_table WHERE name = 'awg0'",
             [],
             |row| Interface::from_row(row),
         )
@@ -864,7 +891,7 @@ pub fn update_interface(fields: &UpdateMap) -> Result<()> {
     exec_update(
         "interfaces_table",
         "name",
-        WhereVal::Str("wg0"),
+        WhereVal::Str("awg0"),
         fields,
         VALID_INTERFACE_COLUMNS,
         &["name"],
@@ -1124,7 +1151,7 @@ pub fn update_password(id: i64, hash: &str) -> Result<()> {
 pub fn get_user_config() -> Result<UserConfig> {
     let c = conn();
     c.query_row(
-        "SELECT * FROM user_configs_table WHERE id = 'wg0'",
+        "SELECT * FROM user_configs_table WHERE id = 'awg0'",
         [],
         |row| UserConfig::from_row(row),
     )
@@ -1142,7 +1169,7 @@ pub fn update_user_config(fields: &UpdateMap) -> Result<()> {
     exec_update(
         "user_configs_table",
         "id",
-        WhereVal::Str("wg0"),
+        WhereVal::Str("awg0"),
         fields,
         VALID_USER_CONFIG_COLUMNS,
         &["id"],
@@ -1163,7 +1190,7 @@ pub fn update_host_port(host: &str, port: i64) -> Result<()> {
 pub fn get_hooks() -> Result<Hooks> {
     let c = conn();
     c.query_row(
-        "SELECT * FROM hooks_table WHERE id = 'wg0'",
+        "SELECT * FROM hooks_table WHERE id = 'awg0'",
         [],
         |row| Hooks::from_row(row),
     )
@@ -1176,7 +1203,7 @@ pub fn update_hooks(data: &UpdateMap) -> Result<()> {
     exec_update(
         "hooks_table",
         "id",
-        WhereVal::Str("wg0"),
+        WhereVal::Str("awg0"),
         data,
         VALID_HOOKS_COLUMNS,
         &["id"],

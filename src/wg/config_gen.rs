@@ -1,4 +1,4 @@
-//! WireGuard/AmneziaWG configuration file generation.
+//! AmneziaWG configuration file generation.
 //!
 //! Pure AmneziaWG — all configs use `awg`-compatible format with
 //! obfuscation parameters.

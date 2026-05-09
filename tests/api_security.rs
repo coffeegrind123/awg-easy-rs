@@ -70,7 +70,7 @@ fn create_user(username: &str, password: &str, role: i64) -> i64 {
 fn create_client(user_id: Option<i64>, name: &str, ip: &str) -> i64 {
     db::create_client(&db::CreateClientParams {
         user_id,
-        interface_id: Some("wg0".into()),
+        interface_id: Some("awg0".into()),
         name: name.into(),
         ipv4_address: Some(ip.into()),
         ipv6_address: Some(format!("fdcc::{ip}")),
