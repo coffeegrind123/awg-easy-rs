@@ -198,15 +198,24 @@ fetch_vendor_blobs() {
         log "$action $version: rebuilding (have=${actual_sha:-<none>} want=$expected_sha)"
         bash "$UPDATE_SH" "$action" "$version"
 
-        # Re-verify after the rebuild — guards against an update.sh bug
-        # that might write the wrong file. update.sh has its own
-        # verify_pin_matches_blob check, but a defence in depth here is
-        # cheap and surfaces any discrepancy at a more useful place.
+        # Re-verify after the rebuild. update.sh is authoritative —
+        # it writes BOTH the blob and the matching pin atomically, so
+        # the post-update.sh state of the pin file is what we should
+        # compare against, not the pre-update.sh value we read above.
+        # This matters for from-source builds (tor, the Go PTs) where
+        # the resulting ELF SHA is environment-dependent (different
+        # Alpine versions / apk package vintages produce different
+        # bytes — tor's build isn't bit-reproducible cross-machine
+        # without SOURCE_DATE_EPOCH and pinned-libc gymnastics).
+        local post_pin_sha
+        post_pin_sha="$(read_pin_value "$pin_file" "$sha_key")"
         actual_sha="$(elf_sha_from_blob "$blob_path")"
-        if [ "$actual_sha" != "$expected_sha" ]; then
-            die "$action: post-build SHA mismatch (got=$actual_sha want=$expected_sha)"
+        if [ "$actual_sha" != "$post_pin_sha" ]; then
+            die "$action: post-build pin/blob mismatch \
+                (blob=$actual_sha pin=$post_pin_sha) — \
+                update.sh failed to atomically write both"
         fi
-        ok "$action $version: built and verified"
+        ok "$action $version: built and verified ($post_pin_sha)"
     done
 }
 
