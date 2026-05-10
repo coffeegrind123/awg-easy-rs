@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Each name here corresponds to a `<NAME>_VERSION` /
 /// `<NAME>_AMD64_SHA256` pair in `vendor/DNS_BUNDLE_VERSION` and a
@@ -66,11 +66,14 @@ fn main() {
 fn process_xray_bundle(
     target_os: &str,
     target_arch: &str,
-    out_dir: &PathBuf,
-    manifest_dir: &PathBuf,
+    out_dir: &Path,
+    manifest_dir: &Path,
 ) {
     println!("cargo:rerun-if-changed=vendor/XRAY_VERSION");
     println!("cargo:rerun-if-changed=vendor/xray-linux-amd64.gz");
+    // Always declare the cfg so `#[cfg(xray_bundled)]` doesn't warn on
+    // builds where the blob is absent.
+    println!("cargo:rustc-check-cfg=cfg(xray_bundled)");
 
     let version_path = manifest_dir.join("vendor/XRAY_VERSION");
     let version_text = fs::read_to_string(&version_path)
@@ -87,29 +90,43 @@ fn process_xray_bundle(
         _ => None,
     };
 
-    if let Some((blob_name, sha_key)) = bundle {
-        let blob_src = manifest_dir.join("vendor").join(blob_name);
-        let blob_dst = out_dir.join("xray.gz");
-        fs::copy(&blob_src, &blob_dst)
-            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display()));
-
-        let expected_sha = kv.get(sha_key).unwrap_or_else(|| {
-            panic!("{sha_key} missing from vendor/XRAY_VERSION but {target_arch} build expects it")
-        });
-
-        println!("cargo:rustc-env=AWG_EASY_XRAY_VERSION={xray_version}");
-        println!("cargo:rustc-env=AWG_EASY_XRAY_SHA256={expected_sha}");
-        println!("cargo:rustc-cfg=xray_bundled");
-        println!("cargo:rustc-check-cfg=cfg(xray_bundled)");
-    } else {
+    let Some((blob_name, sha_key)) = bundle else {
         println!("cargo:rustc-env=AWG_EASY_XRAY_VERSION={xray_version}");
         println!("cargo:rustc-env=AWG_EASY_XRAY_SHA256=");
-        println!("cargo:rustc-check-cfg=cfg(xray_bundled)");
         println!(
             "cargo:warning=Xray bundled mode is not available for target {target_os}-{target_arch}; \
              awg-easy-rs will build without Browsing-mode support."
         );
+        return;
+    };
+
+    let blob_src = manifest_dir.join("vendor").join(blob_name);
+    let expected_sha = kv.get(sha_key).map(String::as_str).unwrap_or("");
+
+    // The blob is a release artifact produced by `scripts/build.sh`
+    // (or the `Build and Release` workflow). On a fresh checkout
+    // without that step having run, the file is absent — proceed
+    // without the bundle so contributors can still `cargo check`,
+    // mirroring the DNS bundle's missing-blob tolerance.
+    if !blob_src.is_file() || expected_sha.is_empty() {
+        println!("cargo:rustc-env=AWG_EASY_XRAY_VERSION={xray_version}");
+        println!("cargo:rustc-env=AWG_EASY_XRAY_SHA256=");
+        println!(
+            "cargo:warning=Xray blob missing ({}) — building without xray_bundled. \
+             Run scripts/build.sh to materialise it from the pinned version.",
+            blob_src.display()
+        );
+        return;
     }
+
+    let blob_dst = out_dir.join("xray.gz");
+    fs::copy(&blob_src, &blob_dst).unwrap_or_else(|e| {
+        panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display())
+    });
+
+    println!("cargo:rustc-env=AWG_EASY_XRAY_VERSION={xray_version}");
+    println!("cargo:rustc-env=AWG_EASY_XRAY_SHA256={expected_sha}");
+    println!("cargo:rustc-cfg=xray_bundled");
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +136,8 @@ fn process_xray_bundle(
 fn process_dns_bundle(
     target_os: &str,
     target_arch: &str,
-    out_dir: &PathBuf,
-    manifest_dir: &PathBuf,
+    out_dir: &Path,
+    manifest_dir: &Path,
 ) {
     println!("cargo:rerun-if-changed=vendor/DNS_BUNDLE_VERSION");
     for bin in DNS_BUNDLE_BINARIES {
@@ -250,11 +267,12 @@ fn process_dns_bundle(
 fn process_telemt_bundle(
     target_os: &str,
     target_arch: &str,
-    out_dir: &PathBuf,
-    manifest_dir: &PathBuf,
+    out_dir: &Path,
+    manifest_dir: &Path,
 ) {
     println!("cargo:rerun-if-changed=vendor/TELEMT_VERSION");
     println!("cargo:rerun-if-changed=vendor/telemt-linux-amd64.gz");
+    println!("cargo:rustc-check-cfg=cfg(telemt_bundled)");
 
     let version_path = manifest_dir.join("vendor/TELEMT_VERSION");
     let version_text = fs::read_to_string(&version_path)
@@ -270,31 +288,38 @@ fn process_telemt_bundle(
         _ => None,
     };
 
-    if let Some((blob_name, sha_key)) = bundle {
-        let blob_src = manifest_dir.join("vendor").join(blob_name);
-        let blob_dst = out_dir.join("telemt.gz");
-        fs::copy(&blob_src, &blob_dst)
-            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display()));
-
-        let expected_sha = kv.get(sha_key).unwrap_or_else(|| {
-            panic!(
-                "{sha_key} missing from vendor/TELEMT_VERSION but {target_arch} build expects it"
-            )
-        });
-
-        println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
-        println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256={expected_sha}");
-        println!("cargo:rustc-cfg=telemt_bundled");
-        println!("cargo:rustc-check-cfg=cfg(telemt_bundled)");
-    } else {
+    let Some((blob_name, sha_key)) = bundle else {
         println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
         println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256=");
-        println!("cargo:rustc-check-cfg=cfg(telemt_bundled)");
         println!(
             "cargo:warning=telemt bundled mode is not available for target {target_os}-{target_arch}; \
              awg-easy-rs will build without Telegram MTProxy support."
         );
+        return;
+    };
+
+    let blob_src = manifest_dir.join("vendor").join(blob_name);
+    let expected_sha = kv.get(sha_key).map(String::as_str).unwrap_or("");
+
+    if !blob_src.is_file() || expected_sha.is_empty() {
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256=");
+        println!(
+            "cargo:warning=telemt blob missing ({}) — building without telemt_bundled. \
+             Run scripts/build.sh to materialise it from the pinned version.",
+            blob_src.display()
+        );
+        return;
     }
+
+    let blob_dst = out_dir.join("telemt.gz");
+    fs::copy(&blob_src, &blob_dst).unwrap_or_else(|e| {
+        panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display())
+    });
+
+    println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
+    println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256={expected_sha}");
+    println!("cargo:rustc-cfg=telemt_bundled");
 }
 
 // ---------------------------------------------------------------------------

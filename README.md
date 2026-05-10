@@ -181,28 +181,53 @@ For upgrades between awg-easy-rs versions, idempotent `ALTER TABLE` migrations a
 
 Requires **Rust 1.80+** (uses `LazyLock`, `OnceLock`, edition 2021).
 
-```bash
-cargo build --release
-strip target/release/awg-easy-rs
-```
-
-Output: `target/release/awg-easy-rs`, ~18 MB stripped (vendored Xray ELF + tokio-rustls account for the bulk; pure-AmneziaWG build is ~3 MB).
+The bundled binary blobs (`vendor/*.gz`) are **not** committed to the repo — they're CI artifacts produced from the audited pin files in `vendor/*_VERSION`. To get a fully-bundled release binary, run:
 
 ```bash
-cargo test                       # 252 tests, ~3 minutes
-cargo test -- --include-ignored  # also runs the 3 e2e tests that spawn real Xray + open TLS
-cargo build                      # debug build for quick iteration
+scripts/build.sh
 ```
 
-### Updating the bundled Xray version
+That:
 
-Bumping is a three-step process documented in `vendor/README.md`. Summary:
+1. Reads each pinned version from `vendor/{XRAY,DNS_BUNDLE,TELEMT}_VERSION`.
+2. Materialises `vendor/<name>-linux-amd64.gz` for each entry by delegating to `vendor/update.sh` (downloads pre-built artifacts where upstream publishes them; builds from source in Alpine Docker for `tor` and the Go pluggable transports). Skips binaries whose `.gz` already round-trips to the pinned SHA.
+3. Builds awg-easy-rs as a fully static **x86_64-linux-musl** ELF (`target/x86_64-unknown-linux-musl/release/awg-easy-rs`, ~18 MB stripped, runs unchanged on glibc / musl / any libc).
 
-1. Download the new `Xray-linux-64.zip`, verify SHA-256 against the upstream `.dgst` file.
-2. Extract the `xray` ELF, `gzip -9 -c xray > vendor/xray-linux-amd64.gz`.
-3. Update `vendor/XRAY_VERSION` (version + uncompressed-ELF SHA-256).
+For the workflow that does the same thing in CI + publishes a release, see [`.github/workflows/build-release.yml`](.github/workflows/build-release.yml).
 
-`build.rs` will refuse to build if the SHA in `XRAY_VERSION` doesn't match the actual blob; runtime extraction will refuse to install a binary whose SHA doesn't match the embedded constant.
+For a quick iterating-on-Rust loop without re-fetching upstreams, the .gz blobs can stay on disk between runs:
+
+```bash
+scripts/build.sh --cargo-only          # use cached vendor blobs
+scripts/build.sh --skip tor --skip xray  # skip specific binaries
+cargo test                              # 250+ tests, ~3 minutes
+cargo build                             # plain debug build
+                                        # (build.rs is tolerant of
+                                        # missing blobs — code paths
+                                        # gate on cfg(*_bundled))
+```
+
+### Updating bundled component versions
+
+Versions are pinned in:
+
+- `vendor/XRAY_VERSION` (Xray-core)
+- `vendor/TELEMT_VERSION` (telemt MTProxy)
+- `vendor/DNS_BUNDLE_VERSION` (dnscrypt-proxy + tor + lyrebird + snowflake + webtunnel)
+
+To bump, run `vendor/update.sh <binary> <version>`. The script downloads / builds, SHA-verifies, and rewrites the matching pin file. For example:
+
+```bash
+vendor/update.sh xray            v26.3.28
+vendor/update.sh telemt          3.4.12
+vendor/update.sh dnscrypt-proxy  2.1.16
+vendor/update.sh tor             0.4.9.9     # Alpine Docker build, ~10 min
+vendor/update.sh lyrebird        0.8.2       # Go static, ~2 min
+vendor/update.sh snowflake       v2.13.2
+vendor/update.sh webtunnel       v0.0.5
+```
+
+Then commit the updated pin file (the `.gz` itself stays out of git). `build.rs` refuses to build if a pin's SHA doesn't match the actual blob; runtime extraction refuses to install a binary whose SHA doesn't match the embedded constant.
 
 ### Running without Docker
 

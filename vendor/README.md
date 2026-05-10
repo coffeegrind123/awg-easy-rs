@@ -1,5 +1,29 @@
 # Vendored third-party binaries
 
+## Repository layout
+
+The pinned **versions + SHA-256 hashes** are committed:
+
+- `XRAY_VERSION`        — Xray-core
+- `TELEMT_VERSION`      — telemt (Telegram MTProxy)
+- `DNS_BUNDLE_VERSION`  — dnscrypt-proxy + tor + lyrebird + snowflake + webtunnel
+- `LICENSES/`           — preserved upstream LICENSE files (legal attribution)
+- `update.sh`           — curation tool: download/build, SHA-verify, gzip into place
+
+The actual **binary blobs (`*-linux-amd64.gz`) are not committed.** They
+are CI artifacts, produced from the pinned source list at build time
+by [`scripts/build.sh`](../scripts/build.sh) (or the
+[`Build and Release`](../.github/workflows/build-release.yml) workflow).
+This keeps the repo small and forces every release to be reproducible
+from the audited pin files.
+
+`build.rs` is tolerant of missing blobs — when one is absent it emits a
+`cargo:warning` and disables the matching `cfg(*_bundled)` gate, so
+`cargo check` / `cargo test` work on a fresh clone without first
+running the vendor stage. To get a fully-bundled binary, run
+`scripts/build.sh` (or any of its `--vendor-only` / `--skip <bin>`
+sub-modes for partial work).
+
 ## Supported architectures
 
 **x86_64-linux only.** arm64 / aarch64 was dropped intentionally — the

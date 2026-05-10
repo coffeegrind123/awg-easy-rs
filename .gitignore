@@ -34,3 +34,9 @@ Thumbs.db
 # WireGuard config files (generated at runtime, contain private keys)
 *.conf
 !docker-compose.yml
+
+# Vendored binary blobs are CI artifacts, not source. They're produced
+# by scripts/build.sh (or the Build and Release workflow) from the
+# audited pin files in vendor/*_VERSION. Keeps the repo small and
+# forces every release to rebuild from the pinned source list.
+/vendor/*.gz

@@ -1,0 +1,181 @@
+name: Build and Release
+
+# Triggers:
+#  - push to main: every merge tags + ships a release
+#    (`v$(date)-$(short_hash)`).
+#  - workflow_dispatch: manual run from the Actions tab — handy when
+#    you want a release without a code change (e.g. picking up a
+#    vendor pin bump that's already in main).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Required for `git push` of the auto-generated tag and for the
+# release-action to upload artifacts.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rustup ships with the runner; we just need the musl target +
+      # musl-tools (provides the musl-gcc linker our RUSTFLAGS asks
+      # for). Toolchain version follows the runner's pre-installed
+      # stable Rust — pin via rust-toolchain.toml if reproducibility
+      # across versions becomes important.
+      - name: Install Rust musl target + musl-tools
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      # Cache the cargo registry / git index / build outputs. Keyed on
+      # the lockfile + pin files so a vendor bump or dependency change
+      # invalidates the cache cleanly. Saves ~3 min on repeat runs.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'vendor/*_VERSION') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # Cache the materialised vendor blobs across runs whenever the
+      # pin files are unchanged. tor-from-source alone is ~10 min;
+      # without this every release run pays that cost.
+      #
+      # Cache key includes the union of every pin file's content, so
+      # bumping any binary version invalidates the cache exactly once.
+      - name: Cache vendor binary blobs
+        uses: actions/cache@v4
+        with:
+          path: vendor/*.gz
+          key: vendor-${{ runner.os }}-${{ hashFiles('vendor/XRAY_VERSION', 'vendor/DNS_BUNDLE_VERSION', 'vendor/TELEMT_VERSION') }}
+
+      - name: Materialise vendor/*.gz + cargo build (musl-static)
+        run: bash scripts/build.sh
+
+      # Inputs for the rest of the steps. `tag` is the canonical
+      # version string for this release; `short_hash` is the rev for
+      # the release body link.
+      - name: Compute version + hash
+        id: version
+        run: |
+          short_hash="$(git rev-parse --short HEAD)"
+          # Some repos prefer the calver-ish v3.4.11-rs1 style; adjust
+          # the date format if you want only year/month.
+          tag="v$(date -u +%Y%m%d)-${short_hash}"
+          echo "short_hash=${short_hash}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          binary="target/x86_64-unknown-linux-musl/release/awg-easy-rs"
+          echo "binary_sha=$(sha256sum "$binary" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Bundle the static binary with its license attribution and the
+      # top-level README into a tar.gz. Operators who deploy by hand
+      # get a self-contained drop.
+      - name: Package release archive
+        id: package
+        run: |
+          mkdir -p dist/awg-easy-rs
+          cp target/x86_64-unknown-linux-musl/release/awg-easy-rs dist/awg-easy-rs/awg-easy-rs
+          cp -r vendor/LICENSES dist/awg-easy-rs/LICENSES
+          cp README.md dist/awg-easy-rs/README.md
+          cp vendor/README.md dist/awg-easy-rs/VENDOR-README.md
+          # Tarball, then plain binary (for users who want to curl it
+          # into a Dockerfile without untar).
+          tar -C dist -czf "awg-easy-rs-${{ steps.version.outputs.tag }}-x86_64-linux-musl.tar.gz" awg-easy-rs
+          cp target/x86_64-unknown-linux-musl/release/awg-easy-rs awg-easy-rs
+          echo "tarball_sha=$(sha256sum awg-easy-rs-${{ steps.version.outputs.tag }}-x86_64-linux-musl.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute bundled-component versions
+        id: components
+        run: |
+          # Pull the pinned versions out of the *_VERSION files so the
+          # release body documents exactly what shipped.
+          read_pin() {
+              awk -v k="$2" '
+                  BEGIN { pat = "^[[:space:]]*" k "[[:space:]]*=[[:space:]]*" }
+                  $0 ~ pat {
+                      sub(pat, "", $0)
+                      sub(/[[:space:]]*#.*$/, "", $0)
+                      sub(/^[[:space:]]+/, "", $0); sub(/[[:space:]]+$/, "", $0)
+                      print; exit
+                  }
+              ' "$1"
+          }
+          {
+            echo "xray=$(read_pin vendor/XRAY_VERSION XRAY_VERSION)"
+            echo "telemt=$(read_pin vendor/TELEMT_VERSION TELEMT_VERSION)"
+            echo "dnscrypt_proxy=$(read_pin vendor/DNS_BUNDLE_VERSION DNSCRYPT_PROXY_VERSION)"
+            echo "tor=$(read_pin vendor/DNS_BUNDLE_VERSION TOR_VERSION)"
+            echo "lyrebird=$(read_pin vendor/DNS_BUNDLE_VERSION LYREBIRD_VERSION)"
+            echo "snowflake=$(read_pin vendor/DNS_BUNDLE_VERSION SNOWFLAKE_VERSION)"
+            echo "webtunnel=$(read_pin vendor/DNS_BUNDLE_VERSION WEBTUNNEL_VERSION)"
+          } >> "$GITHUB_OUTPUT"
+
+      # `git push origin <tag>` requires permission to push refs. The
+      # default GITHUB_TOKEN with `contents: write` is enough.
+      - name: Tag the commit
+        run: |
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          name: "awg-easy-rs ${{ steps.version.outputs.tag }}"
+          artifacts: |
+            awg-easy-rs-${{ steps.version.outputs.tag }}-x86_64-linux-musl.tar.gz
+            awg-easy-rs
+          body: |
+            Statically linked **x86_64-linux** ELF — runs unchanged on
+            glibc, musl, or any other libc host. No system packages
+            required at runtime beyond `nft` (for the per-client
+            firewall) and `awg`/`awg-quick` (the AmneziaWG userspace).
+
+            ## Bundled components
+
+            All embedded via `include_bytes!` at compile time and
+            extracted on first run. Versions are pinned in
+            `vendor/*_VERSION` and SHA-verified at both build and
+            extract time.
+
+            | Component | Version | Purpose |
+            |-----------|---------|---------|
+            | Xray-core | `${{ steps.components.outputs.xray }}` | Browsing-mode VLESS+Reality+Vision |
+            | telemt | `${{ steps.components.outputs.telemt }}` | Telegram MTProxy (Fake-TLS) |
+            | dnscrypt-proxy | `${{ steps.components.outputs.dnscrypt_proxy }}` | DoH/DNSCrypt egress |
+            | tor | `${{ steps.components.outputs.tor }}` | optional SOCKS over Tor |
+            | lyrebird (obfs4) | `${{ steps.components.outputs.lyrebird }}` | pluggable transport |
+            | snowflake | `${{ steps.components.outputs.snowflake }}` | pluggable transport |
+            | webtunnel | `${{ steps.components.outputs.webtunnel }}` | pluggable transport |
+
+            See [`vendor/README.md`](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.tag }}/vendor/README.md) for full provenance + license attribution.
+
+            ## SHA-256
+
+            | File | Hash |
+            |------|------|
+            | `awg-easy-rs` | `${{ steps.version.outputs.binary_sha }}` |
+            | `awg-easy-rs-${{ steps.version.outputs.tag }}-x86_64-linux-musl.tar.gz` | `${{ steps.package.outputs.tarball_sha }}` |
+
+            ## Build info
+
+            - Commit: [`${{ steps.version.outputs.short_hash }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            - Build log: [Actions run #${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            See the [README](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.tag }}/README.md) for installation.
+          draft: false
+          prerelease: false
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}
