@@ -446,6 +446,13 @@ pub async fn get_interface(
         "i5": iface.i5,
         "additionalConfig": iface.additional_config,
         "firewallEnabled": iface.firewall_enabled,
+        // DNS-leak prevention. Three independent fields so the UI can
+        // expose the master switch separately from the redirect target
+        // (operator might want to set the target ahead of time and flip
+        // the switch later) and from the residual-leak drop policy.
+        "dnsLockdown": iface.dns_lockdown,
+        "dnsLockdownTarget": iface.dns_lockdown_target,
+        "dnsBlockExternal": iface.dns_block_external,
         "enabled": iface.enabled,
     })))
 }
@@ -505,23 +512,66 @@ pub async fn update_interface(
                 fields.insert("firewall_enabled".into(), s);
             }
         }
+        // DNS lockdown — three independent fields. Validate the target
+        // here (instead of just at firewall-apply time) so a bad value
+        // bounces back to the UI as a 4xx instead of getting silently
+        // accepted into the DB and then failing on the next nft apply.
+        if let Some(val) = map.get("dnsLockdownTarget") {
+            if let Some(s) = value_to_string(val) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    if trimmed.parse::<std::net::IpAddr>().is_err() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error":
+                                    "dnsLockdownTarget must be a valid IPv4 or IPv6 literal \
+                                     (hostnames are not accepted)"
+                            })),
+                        ));
+                    }
+                }
+                fields.insert("dns_lockdown_target".into(), trimmed.to_string());
+            }
+        }
+        if let Some(val) = map.get("dnsLockdown") {
+            if let Some(s) = value_to_string(val) {
+                fields.insert("dns_lockdown".into(), s);
+            }
+        }
+        if let Some(val) = map.get("dnsBlockExternal") {
+            if let Some(s) = value_to_string(val) {
+                fields.insert("dns_block_external".into(), s);
+            }
+        }
     }
 
     if !fields.is_empty() {
         db::update_interface(&fields).map_err(map_err)?;
         wg::save_config().map_err(map_err)?;
 
-        // Apply firewall changes if firewall_enabled was toggled
+        // Apply firewall changes if firewall_enabled or any DNS
+        // lockdown field was touched. We re-read the interface row
+        // rather than acting on `body` directly so the apply uses
+        // exactly what the DB now holds — no risk of acting on a
+        // partial update if a future caller batches multiple writes.
         if let Value::Object(ref map) = body {
-            if map.contains_key("firewallEnabled") {
+            let firewall_touched = map.contains_key("firewallEnabled");
+            let dns_touched = map.contains_key("dnsLockdown")
+                || map.contains_key("dnsLockdownTarget")
+                || map.contains_key("dnsBlockExternal");
+
+            if firewall_touched || dns_touched {
                 let iface = db::get_interface().map_err(map_err)?;
-                if iface.firewall_enabled {
-                    crate::firewall::rebuild_rules().map_err(map_err).ok();
-                } else {
-                    crate::firewall::remove_filtering(&iface.name)
-                        .map_err(map_err)
-                        .ok();
-                }
+                // rebuild_rules handles both per-peer filtering and DNS
+                // lockdown atomically, with the right "off" semantics
+                // for each independently. Cheaper than two calls.
+                crate::firewall::rebuild_rules().map_err(map_err).ok();
+
+                // If per-peer firewall was specifically turned off and
+                // DNS lockdown is also off, rebuild_rules() already
+                // called remove_filtering. Nothing more to do.
+                let _ = iface;
             }
         }
     }

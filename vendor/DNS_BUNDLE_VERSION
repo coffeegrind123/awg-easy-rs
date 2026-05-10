@@ -1,0 +1,65 @@
+# Pinned versions and SHA-256 sums for the DNS bundle, embedded in the
+# awg-easy-rs binary. build.rs reads this file and validates that the
+# vendored .gz blobs match the expected SHAs at compile time.
+#
+# Each binary is recorded as:
+#   <NAME>_VERSION   = <upstream tag / version string>
+#   <NAME>_AMD64_SHA256 = <SHA-256 of the *uncompressed* ELF, lowercase hex>
+#
+# x86_64 (amd64) is the only supported target — see
+# vendor/README.md → "Supported architectures" for the rationale.
+#
+# The runtime extractor (src/dns/runtime.rs) hashes the on-disk ELF and
+# skips re-extraction when it already matches — same pattern as the
+# Xray bundle. Bumping a binary means: download upstream → SHA-verify
+# the upstream archive → extract → `gzip -9 -c` into vendor/ → update
+# the version string and the AMD64 SHA here.
+#
+# Until the blobs land in vendor/, all SHAs are blank. build.rs treats
+# blank SHAs as "this binary is not bundled" and refuses to enable the
+# `dns_bundled` cfg gate, so builds keep working with no DNS-bundle
+# support until the curation step is done.
+
+# ---------------------------------------------------------------------------
+# dnscrypt-proxy — DoH / DNSCrypt egress, optional Tor SOCKS forwarding.
+# Upstream: https://github.com/DNSCrypt/dnscrypt-proxy/releases
+# Asset name: dnscrypt-proxy-linux_x86_64-<ver>.tar.gz
+# ---------------------------------------------------------------------------
+DNSCRYPT_PROXY_VERSION = 2.1.15
+DNSCRYPT_PROXY_AMD64_SHA256 = 0dca3463c7f596e36f1819f4c8b669c451c735415f04fb7e2cf4a0958e4f7119
+
+# ---------------------------------------------------------------------------
+# tor — SOCKS proxy, only spawned when the operator opts in. Static-musl
+# build (the torproject.org expert bundles are dynamically linked; we
+# need a static one — Alpine `apk add tor-static` is the recommended
+# source, or a from-source musl build).
+# Upstream: https://www.torproject.org/download/tor/
+# ---------------------------------------------------------------------------
+TOR_VERSION = 0.4.9.8
+TOR_AMD64_SHA256 = 03aa2c413ed30845cc7b5dd358148ce3ef51878a834b455d775a2d0d720e6ad9
+
+# ---------------------------------------------------------------------------
+# lyrebird — obfs4 pluggable transport (Go, static). Spawned by tor
+# itself via `ClientTransportPlugin obfs4 exec /path/to/lyrebird`; we
+# just place the binary on disk and reference it from the generated
+# torrc.
+# Upstream: https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/releases
+# ---------------------------------------------------------------------------
+LYREBIRD_VERSION = 0.8.1
+LYREBIRD_AMD64_SHA256 = 0776d1052a8a30e800b68740628ab867d5bf733fa53af968660996eb783f1ba4
+
+# ---------------------------------------------------------------------------
+# snowflake — WebRTC-based pluggable transport (Go, static). Bundles
+# its own WebRTC stack so the binary is larger than the others.
+# Upstream: https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/-/releases
+# ---------------------------------------------------------------------------
+SNOWFLAKE_VERSION = v2.13.1
+SNOWFLAKE_AMD64_SHA256 = b3261406b38f065726b271475401e180738471c0f10a65faf94b83816c01332e
+
+# ---------------------------------------------------------------------------
+# webtunnel — HTTPS-tunneling pluggable transport (Go, static). Useful
+# in censored networks that allow HTTPS but DPI-block direct tor.
+# Upstream: https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/-/releases
+# ---------------------------------------------------------------------------
+WEBTUNNEL_VERSION = v0.0.4
+WEBTUNNEL_AMD64_SHA256 = 0d684db99a1ca955d6cd6262686f8832e92180563e115b4f23ad31cc8fb3c954

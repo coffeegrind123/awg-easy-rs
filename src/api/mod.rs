@@ -12,6 +12,7 @@ pub mod clients;
 pub mod routes;
 pub mod session;
 pub mod setup;
+pub mod dns;
 pub mod xray;
 
 use axum::extract::FromRef;
@@ -199,6 +200,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/admin/xray/restart",
             axum::routing::post(xray::restart),
+        )
+        // Bundled DNS stack (dnscrypt-proxy + tor + PTs) — admin
+        .route(
+            "/admin/dns/bundle",
+            axum::routing::get(dns::get_bundle).post(dns::update_bundle),
+        )
+        .route(
+            "/admin/dns/status",
+            axum::routing::get(dns::supervisor_status),
+        )
+        .route(
+            "/admin/dns/restart",
+            axum::routing::post(dns::restart),
         )
         // Xray clients
         .route(

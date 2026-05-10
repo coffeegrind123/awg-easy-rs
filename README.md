@@ -20,7 +20,8 @@ Both modes share the same admin UI, user accounts, session/auth, and SQLite DB.
 | Area | What's included |
 |---|---|
 | **AmneziaWG 2.0 (Gaming)** | Full obfuscation set: `Jc / Jmin / Jmax`, `S1‑S4`, `H1‑H4` (with non-overlapping ranges), `I1‑I5` (with CPS tag-grammar validation: `<b 0xHEX>`, `<r N>`, `<rc N>`, `<rd N>`, `<t>`, `<c>`). Per-peer `AdvancedSecurity` opt-in (on / off / auto-detect from H1 magic header). |
-| **Xray VLESS+Reality+Vision (Browsing)** | Bundled Xray-core v26.3.27 ELF (vendored, gzipped, SHA-verified, ~13 MB compressed) for amd64 + aarch64. Vision flow hardcoded. Per-client UUID **and** per-client `shortId` (revocable individually). TLS 1.3 dest probe with SAN-match enforcement (rejects burned-IP / private-CN destinations before save). Tokio-supervised subprocess: SIGHUP reload, SIGTERM+10s grace shutdown, capped exponential backoff on crash. Free-form `additional_config` JSON deep-merged into the inbound. |
+| **Xray VLESS+Reality+Vision (Browsing)** | Bundled Xray-core v26.3.27 ELF (vendored, gzipped, SHA-verified, ~13 MB compressed). Vision flow hardcoded. Per-client UUID **and** per-client `shortId` (revocable individually). TLS 1.3 dest probe with SAN-match enforcement (rejects burned-IP / private-CN destinations before save). Tokio-supervised subprocess: SIGHUP reload, SIGTERM+10s grace shutdown, capped exponential backoff on crash. Free-form `additional_config` JSON deep-merged into the inbound. |
+| **Target** | x86_64 Linux only. arm64 was dropped intentionally — see `vendor/README.md` for the rationale. |
 | **Web UI** | Single embedded SPA (HTML + `app.js`). Top-nav Gaming / Browsing toggle. Live transfer rates (AmneziaWG side), QR codes, one-time download links, admin panels for interface / hooks / general / user-config / Xray inbound. Inline guidance on which client app eats which share format (Amnezia VPN, v2rayN, v2rayNG, NekoBox, Hiddify, Streisand, Shadowrocket, FoXray). |
 | **Share formats** | AmneziaWG: `.conf` file, QR, one-time link. Xray: `vless://` URL (with both `spx` and `spiderX` for max compat), QR, native Amnezia-format JSON. |
 | **Auth** | Argon2id password hashing, server-side session cookies (`SameSite=Strict`, `HttpOnly`, `Secure` unless `INSECURE=true`). Per-username (10/min) **and** per-source-IP (50/min) login rate limit. Constant-time username-not-found path (no enumeration via timing). |
@@ -196,9 +197,9 @@ cargo build                      # debug build for quick iteration
 
 Bumping is a three-step process documented in `vendor/README.md`. Summary:
 
-1. Download the new `Xray-linux-64.zip` + `Xray-linux-arm64-v8a.zip`, verify SHA-256 against upstream `.dgst` files.
-2. Extract the `xray` ELF from each, `gzip -9 -c xray > vendor/xray-linux-<arch>.gz`.
-3. Update `vendor/XRAY_VERSION` (version + uncompressed-ELF SHA-256s).
+1. Download the new `Xray-linux-64.zip`, verify SHA-256 against the upstream `.dgst` file.
+2. Extract the `xray` ELF, `gzip -9 -c xray > vendor/xray-linux-amd64.gz`.
+3. Update `vendor/XRAY_VERSION` (version + uncompressed-ELF SHA-256).
 
 `build.rs` will refuse to build if the SHA in `XRAY_VERSION` doesn't match the actual blob; runtime extraction will refuse to install a binary whose SHA doesn't match the embedded constant.
 
@@ -285,9 +286,9 @@ static/
   app.js           # SPA logic
   *.png *.svg      # branding
 vendor/
-  xray-linux-amd64.gz   # pinned Xray-core v26.3.27 ELF, gzipped
-  xray-linux-arm64.gz
-  XRAY_VERSION          # version + decompressed-ELF SHA-256s
+  xray-linux-amd64.gz   # pinned Xray-core v26.3.27 ELF, gzipped (x86_64 only)
+  XRAY_VERSION          # version + decompressed-ELF SHA-256
+  DNS_BUNDLE_VERSION    # pins for the optional DNS bundle (dnscrypt-proxy/tor/PTs)
   README.md             # update procedure
 build.rs                # picks the matching vendor blob per target arch
 ```

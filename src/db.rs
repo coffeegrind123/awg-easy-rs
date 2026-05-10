@@ -84,6 +84,22 @@ pub struct Interface {
     pub i4: String,
     pub i5: String,
     pub firewall_enabled: bool,
+    /// DNS-leak-prevention master switch. When true, all UDP/TCP :53 and
+    /// :853 traffic from peers is DNAT-redirected to `dns_lockdown_target`
+    /// before it leaves the box, regardless of the peer's configured
+    /// `DNS = …` line. Closes the honor-system hole where a misconfigured
+    /// or malicious client queries any resolver it likes over the tunnel.
+    pub dns_lockdown: bool,
+    /// IP literal (v4 or v6) packets are redirected to when `dns_lockdown`
+    /// is on. Empty string disables the lockdown even if the bool is set
+    /// (defensive — prevents an unconfigured field from generating
+    /// `dnat to :53` rules with no target).
+    pub dns_lockdown_target: String,
+    /// Belt-and-braces: when true AND `dns_lockdown` is on, drop any peer
+    /// :53/:853 traffic that isn't headed to `dns_lockdown_target`. Catches
+    /// edge cases the DNAT rule misses (e.g. v6 queries when target is v4,
+    /// or a future address family the rule doesn't match).
+    pub dns_block_external: bool,
     /// Free-form text appended verbatim to the server `[Interface]` block.
     /// Mirrors amnezia-client's `additionalServerConfig` — escape hatch for
     /// keys awg-quick understands but the UI doesn't model. Empty by default.
@@ -233,6 +249,54 @@ pub struct XrayInbound {
     pub updated_at: String,
 }
 
+/// Singleton row holding the bundled-DNS-stack configuration. Read by
+/// `dns::supervisor` at startup and after every admin POST. The
+/// supervisor is the sole consumer — keep field-level docs in sync with
+/// `src/dns/dnscrypt.rs` and `src/dns/tor.rs` since those translate
+/// these fields into TOML/torrc directives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsBundle {
+    pub id: String,
+    /// Master switch for the dnscrypt-proxy supervisor. When false the
+    /// supervisor refuses to spawn — DNS lockdown then needs an
+    /// external resolver target (the operator's pre-existing setup).
+    pub enabled: bool,
+    /// Port dnscrypt-proxy binds to (`listen_addresses` entry). Default
+    /// 5353 to avoid colliding with anything already on :53; the DNS
+    /// lockdown DNAT redirects peer :53/:853 to this port.
+    pub listen_port: i64,
+    /// JSON array of upstream resolver names (DNSCrypt or DoH). Empty
+    /// = let dnscrypt-proxy auto-select from its public-resolvers source.
+    pub upstream_resolvers: String,
+    pub require_dnssec: bool,
+    pub require_nolog: bool,
+    pub require_nofilter: bool,
+    /// Independently opt-in for tor SOCKS routing — even with
+    /// `enabled=true`, tor stays off unless this is also true. Per
+    /// feedback_dns_bundle.md: tor adds latency and trust assumptions
+    /// the user explicitly doesn't want by default.
+    pub tor_enabled: bool,
+    pub tor_socks_port: i64,
+    /// Comma-separated 2-letter country codes wrapped in braces, e.g.
+    /// `"{us},{gb}"`. Empty = tor's default exit selection.
+    pub tor_exit_nodes: String,
+    /// Same format as `tor_exit_nodes` but for a separate tor instance
+    /// dedicated to DNS egress (mirrors Wiregate's two-tor design so
+    /// query traffic and content traffic exit through different
+    /// circuits / countries).
+    pub tor_dns_exit_nodes: String,
+    pub tor_use_bridges: bool,
+    /// Pluggable transport name: `obfs4` (lyrebird), `snowflake`, or
+    /// `webtunnel`. Empty disables PT use.
+    pub tor_plugin: String,
+    /// Free-form TOML appended to the generated dnscrypt-proxy.toml.
+    /// Mirrors `XrayInbound::additional_config` — escape hatch for keys
+    /// the UI doesn't model.
+    pub additional_config: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One Xray (VLESS) peer. The `inbound_id` FK supports multi-inbound
 /// later; v1 always points at `'xray0'`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +430,24 @@ impl Interface {
             i4: row.get("i4")?,
             i5: row.get("i5")?,
             firewall_enabled: int_to_bool(row.get::<_, i64>("firewall_enabled")?),
+            // Older DBs (pre DNS-lockdown) may not have these columns yet;
+            // default to a disabled / empty configuration so behavior is
+            // unchanged on upgrade. apply_migrations() ALTERs them in on
+            // boot, so this fallback only matters during the brief window
+            // before the first migration pass.
+            dns_lockdown: row
+                .get::<_, Option<i64>>("dns_lockdown")
+                .ok()
+                .flatten()
+                .map(int_to_bool)
+                .unwrap_or(false),
+            dns_lockdown_target: row.get("dns_lockdown_target").unwrap_or_default(),
+            dns_block_external: row
+                .get::<_, Option<i64>>("dns_block_external")
+                .ok()
+                .flatten()
+                .map(int_to_bool)
+                .unwrap_or(true),
             // Older DBs may not have this column yet; tolerate it.
             additional_config: row.get("additional_config").unwrap_or_default(),
             enabled: int_to_bool(row.get::<_, i64>("enabled")?),
@@ -547,6 +629,29 @@ impl XrayClient {
     }
 }
 
+impl DnsBundle {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(DnsBundle {
+            id: row.get("id")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            listen_port: row.get("listen_port")?,
+            upstream_resolvers: row.get("upstream_resolvers")?,
+            require_dnssec: int_to_bool(row.get::<_, i64>("require_dnssec")?),
+            require_nolog: int_to_bool(row.get::<_, i64>("require_nolog")?),
+            require_nofilter: int_to_bool(row.get::<_, i64>("require_nofilter")?),
+            tor_enabled: int_to_bool(row.get::<_, i64>("tor_enabled")?),
+            tor_socks_port: row.get("tor_socks_port")?,
+            tor_exit_nodes: row.get("tor_exit_nodes")?,
+            tor_dns_exit_nodes: row.get("tor_dns_exit_nodes")?,
+            tor_use_bridges: int_to_bool(row.get::<_, i64>("tor_use_bridges")?),
+            tor_plugin: row.get("tor_plugin")?,
+            additional_config: row.get("additional_config")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQL DDL – all seven tables with the final schema
 // ---------------------------------------------------------------------------
@@ -578,6 +683,13 @@ CREATE TABLE IF NOT EXISTS interfaces_table (
     i4                TEXT NOT NULL DEFAULT '',
     i5                TEXT NOT NULL DEFAULT '',
     firewall_enabled  INTEGER NOT NULL DEFAULT 0,
+    -- DNS-leak prevention. dns_lockdown turns on the DNAT redirect of all
+    -- peer :53/:853 traffic to dns_lockdown_target; dns_block_external adds
+    -- a belt-and-braces drop for any DNS query that slipped past the DNAT.
+    -- Default off so upgraded DBs preserve previous behaviour.
+    dns_lockdown          INTEGER NOT NULL DEFAULT 0,
+    dns_lockdown_target   TEXT    NOT NULL DEFAULT '',
+    dns_block_external    INTEGER NOT NULL DEFAULT 1,
     additional_config TEXT NOT NULL DEFAULT '',
     enabled           INTEGER NOT NULL DEFAULT 1,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -729,6 +841,39 @@ CREATE TABLE IF NOT EXISTS xray_clients_table (
     FOREIGN KEY (inbound_id) REFERENCES xray_inbound_table(id)
 )"#;
 
+// dns_bundle_table — singleton (id always 'dns0'). Configuration for the
+// bundled dnscrypt-proxy + (opt-in) tor stack. Defaults match the
+// "minimum risk" posture: dnscrypt off, tor off. The supervisor reads
+// this row at startup and after every admin POST.
+//
+// Mirrors xray_inbound_table's singleton pattern. additional_config is a
+// free-form TOML fragment merged into the generated dnscrypt-proxy.toml
+// — escape hatch for keys the UI doesn't model (e.g. custom server
+// stamps, advanced caching tuning).
+const CREATE_DNS_BUNDLE: &str = r#"
+CREATE TABLE IF NOT EXISTS dns_bundle_table (
+    id                   TEXT PRIMARY KEY,
+    enabled              INTEGER NOT NULL DEFAULT 0,
+    listen_port          INTEGER NOT NULL DEFAULT 5353,
+    upstream_resolvers   TEXT NOT NULL DEFAULT '[]',
+    require_dnssec       INTEGER NOT NULL DEFAULT 1,
+    require_nolog        INTEGER NOT NULL DEFAULT 1,
+    require_nofilter     INTEGER NOT NULL DEFAULT 0,
+    -- Tor: opt-in, off by default. Even with the bundle enabled the
+    -- supervisor refuses to spawn tor unless tor_enabled=1 (see
+    -- feedback_dns_bundle.md memory). When on, dnscrypt-proxy's
+    -- proxy = 'socks5://127.0.0.1:<tor_socks_port>' line is enabled.
+    tor_enabled          INTEGER NOT NULL DEFAULT 0,
+    tor_socks_port       INTEGER NOT NULL DEFAULT 9053,
+    tor_exit_nodes       TEXT NOT NULL DEFAULT '',
+    tor_dns_exit_nodes   TEXT NOT NULL DEFAULT '',
+    tor_use_bridges      INTEGER NOT NULL DEFAULT 0,
+    tor_plugin           TEXT NOT NULL DEFAULT '',
+    additional_config    TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+)"#;
+
 // ---------------------------------------------------------------------------
 // Hook templates
 // ---------------------------------------------------------------------------
@@ -777,6 +922,7 @@ fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(CREATE_HOOKS)?;
     conn.execute_batch(CREATE_GENERAL)?;
     conn.execute_batch(CREATE_ONE_TIME_LINKS)?;
+    conn.execute_batch(CREATE_DNS_BUNDLE)?;
     conn.execute_batch(CREATE_XRAY_INBOUND)?;
     conn.execute_batch(CREATE_XRAY_CLIENTS)?;
     apply_migrations(conn)?;
@@ -821,6 +967,34 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         )?;
         tracing::info!(
             "DB migration: added user_configs_table.default_additional_config"
+        );
+    }
+    // DNS-leak-prevention columns. Three separate ALTERs — SQLite ALTER
+    // doesn't support multiple ADD COLUMN in one statement, and column-by-
+    // column existence checks let an upgrade that crashed mid-way through
+    // resume cleanly on the next boot.
+    if !column_exists(conn, "interfaces_table", "dns_lockdown")? {
+        conn.execute_batch(
+            "ALTER TABLE interfaces_table ADD COLUMN dns_lockdown INTEGER NOT NULL DEFAULT 0",
+        )?;
+        tracing::info!(
+            "DB migration: added interfaces_table.dns_lockdown (DNS leak-prevention master switch)"
+        );
+    }
+    if !column_exists(conn, "interfaces_table", "dns_lockdown_target")? {
+        conn.execute_batch(
+            "ALTER TABLE interfaces_table ADD COLUMN dns_lockdown_target TEXT NOT NULL DEFAULT ''",
+        )?;
+        tracing::info!(
+            "DB migration: added interfaces_table.dns_lockdown_target (resolver IP DNAT redirects to)"
+        );
+    }
+    if !column_exists(conn, "interfaces_table", "dns_block_external")? {
+        conn.execute_batch(
+            "ALTER TABLE interfaces_table ADD COLUMN dns_block_external INTEGER NOT NULL DEFAULT 1",
+        )?;
+        tracing::info!(
+            "DB migration: added interfaces_table.dns_block_external (drop residual peer :53/:853 leaks)"
         );
     }
     // One-shot: replace the iptables-flavoured default hooks from earlier
@@ -872,6 +1046,14 @@ fn ensure_singleton_rows(conn: &Connection) -> Result<()> {
             "chrome",
             0,
         ],
+    )?;
+    // dns_bundle: every field defaults to its column-level default in
+    // CREATE_DNS_BUNDLE — most-conservative posture (everything off).
+    // Operators flip the toggles explicitly; tor stays off independent
+    // of the master enable.
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_bundle_table (id) VALUES (?1)",
+        params!["dns0"],
     )?;
     Ok(())
 }
@@ -1095,7 +1277,9 @@ const VALID_INTERFACE_COLUMNS: &[&str] = &[
     "name", "device", "port", "private_key", "public_key", "ipv4_cidr", "ipv6_cidr",
     "mtu", "j_c", "j_min", "j_max", "s1", "s2", "s3", "s4",
     "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
-    "firewall_enabled", "additional_config", "enabled",
+    "firewall_enabled",
+    "dns_lockdown", "dns_lockdown_target", "dns_block_external",
+    "additional_config", "enabled",
 ];
 
 pub fn update_interface(fields: &UpdateMap) -> Result<()> {
@@ -1147,6 +1331,20 @@ pub fn update_interface_awg_params(params: &crate::wg::params::AwgParams) -> Res
 pub fn set_firewall_enabled(enabled: bool) -> Result<()> {
     let mut fields = UpdateMap::new();
     fields.insert("firewall_enabled".into(), bool_to_int(enabled).to_string());
+    update_interface(&fields)
+}
+
+/// Update all three DNS-lockdown fields in one transaction. Used by the
+/// admin API change handler when the operator flips any of the toggles —
+/// keeps the firewall rebuild and DB write in sync.
+pub fn set_dns_lockdown(enabled: bool, target: &str, block_external: bool) -> Result<()> {
+    let mut fields = UpdateMap::new();
+    fields.insert("dns_lockdown".into(), bool_to_int(enabled).to_string());
+    fields.insert("dns_lockdown_target".into(), target.to_string());
+    fields.insert(
+        "dns_block_external".into(),
+        bool_to_int(block_external).to_string(),
+    );
     update_interface(&fields)
 }
 
@@ -1688,4 +1886,45 @@ pub fn toggle_xray_client(id: i64, enabled: bool) -> Result<()> {
     let mut fields = UpdateMap::new();
     fields.insert("enabled".into(), bool_to_int(enabled).to_string());
     update_xray_client(id, &fields)
+}
+
+// ---------------------------------------------------------------------------
+// DNS bundle helpers
+// ---------------------------------------------------------------------------
+
+pub fn get_dns_bundle() -> Result<DnsBundle> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM dns_bundle_table WHERE id = 'dns0'",
+        [],
+        |row| DnsBundle::from_row(row),
+    )
+    .context("No dns_bundle row found")
+}
+
+const VALID_DNS_BUNDLE_COLUMNS: &[&str] = &[
+    "enabled",
+    "listen_port",
+    "upstream_resolvers",
+    "require_dnssec",
+    "require_nolog",
+    "require_nofilter",
+    "tor_enabled",
+    "tor_socks_port",
+    "tor_exit_nodes",
+    "tor_dns_exit_nodes",
+    "tor_use_bridges",
+    "tor_plugin",
+    "additional_config",
+];
+
+pub fn update_dns_bundle(fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "dns_bundle_table",
+        "id",
+        WhereVal::Str("dns0"),
+        fields,
+        VALID_DNS_BUNDLE_COLUMNS,
+        &["id"],
+    )
 }

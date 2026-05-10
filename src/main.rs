@@ -61,6 +61,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Xray supervisor startup failed (non-fatal): {e}");
     }
 
+    // Bring the bundled DNS stack online if it's been enabled. Same
+    // non-fatal contract as Xray — operators who haven't toggled the
+    // master switch see Status::Disabled, not a crash. Tor stays off
+    // independently of the master switch (see DnsBundle.tor_enabled).
+    #[cfg(dns_bundled)]
+    if let Err(e) = awg_easy_rs::dns::supervisor::ensure_running().await {
+        tracing::warn!("DNS bundle supervisor startup failed (non-fatal): {e}");
+    }
+
     // Start background cron job (every 60 seconds)
     tokio::spawn(async move {
         loop {
@@ -127,11 +136,14 @@ async fn main() -> anyhow::Result<()> {
     };
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
-    // Post-serve cleanup. Order matters: stop Xray first so its child
-    // process is reaped before we tear down firewall state, then peel
-    // back any iptables-legacy compat rules we inserted at startup.
+    // Post-serve cleanup. Order matters: stop Xray + DNS supervisor
+    // children first so they're reaped before we tear down firewall
+    // state, then peel back any iptables-legacy compat rules we
+    // inserted at startup.
     #[cfg(xray_bundled)]
     awg_easy_rs::xray::supervisor::shutdown_for_exit().await;
+    #[cfg(dns_bundled)]
+    awg_easy_rs::dns::supervisor::shutdown_for_exit().await;
 
     if let Ok(iface) = db::get_interface() {
         firewall::remove_legacy_compat(

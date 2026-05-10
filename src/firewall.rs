@@ -1,9 +1,9 @@
-//! Per-client firewall, native nftables.
+//! Per-client firewall + DNS-leak prevention, native nftables.
 //!
 //! All our rules live inside one `inet awg-easy-rs` table — the same
 //! table the AmneziaWG PostUp hook creates for masquerade / accept rules.
-//! Sharing the table means we can rebuild *just* the per-client chain
-//! atomically without disturbing the operator's NAT / forwarding setup.
+//! Sharing the table means we can rebuild *just* our chains atomically
+//! without disturbing the operator's NAT / forwarding setup.
 //!
 //! Layout we expect:
 //!
@@ -11,6 +11,7 @@
 //! table inet awg-easy-rs {
 //!   chain forward {                          # owned by hooks
 //!     type filter hook forward priority filter; policy accept;
+//!     iifname "awg0" jump dns-lockdown       # only when dns_lockdown=true
 //!     iifname "awg0" jump wg-clients
 //!     oifname "awg0" jump wg-clients
 //!   }
@@ -19,13 +20,34 @@
 //!     # or empty (when firewall_disabled — all traffic returns and is
 //!     # accepted by the forward chain's policy)
 //!   }
+//!   chain dns-lockdown {                     # owned by this module
+//!     # accept the redirect target, drop residual :53/:853 to anywhere
+//!     # else. Only populated / jumped to when dns_lockdown=true.
+//!   }
+//!   chain dns-prerouting {                   # owned by this module
+//!     type nat hook prerouting priority dstnat; policy accept;
+//!     # DNAT every peer :53/:853 packet to dns_lockdown_target.
+//!     # Empty (and chain absent) when dns_lockdown=false.
+//!   }
 //!   chain nat-postrouting { ... }            # owned by hooks
 //!   chain filter-input    { ... }            # owned by hooks
 //! }
 //! ```
 //!
-//! The per-client chain is built via a single `nft -f -` transaction so
+//! Every chain we own is rebuilt via a single `nft -f -` transaction so
 //! the rebuild is atomic — peers never see a half-applied ruleset.
+//!
+//! ## DNS lockdown rationale
+//!
+//! WireGuard / AmneziaWG `DNS = …` is honor-system: the client decides
+//! which resolver to query. A misconfigured app, a malicious binary, or
+//! a peer who edited their `.conf` can query 1.1.1.1 / 8.8.8.8 / their
+//! ISP's resolver directly through the tunnel and bypass any in-VPN
+//! filtering, logging, or DNSSEC posture. The dns-prerouting DNAT
+//! rewrites the destination to `dns_lockdown_target` before the packet
+//! leaves the box — the client doesn't get a choice. dns-lockdown's
+//! drop catches v6 leaks (when the target is v4-only) and any future
+//! address family the DNAT rule doesn't match.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -39,6 +61,20 @@ pub const TABLE: &str = "awg-easy-rs";
 
 /// Per-client filtering chain. Lives inside `TABLE`.
 const CHAIN: &str = "wg-clients";
+
+/// Filter chain that drops residual peer DNS traffic (`udp/tcp dport
+/// 53|853`) headed anywhere other than `dns_lockdown_target`. Jumped to
+/// from `forward` only when `dns_lockdown && dns_block_external`.
+const DNS_FILTER_CHAIN: &str = "dns-lockdown";
+
+/// NAT chain that DNAT-redirects every peer :53/:853 packet to
+/// `dns_lockdown_target:53`. Lives at `prerouting/dstnat` priority so
+/// the rewrite happens before any later forward / filter / postrouting
+/// hook sees the packet. Created on demand (when `dns_lockdown=true`)
+/// and torn down when the toggle goes off — we don't leave an empty
+/// nat hook chain around because that costs a per-packet cycle even
+/// when it has no rules.
+const DNS_NAT_CHAIN: &str = "dns-prerouting";
 
 /// Run a single `nft` invocation with the given argv. argv-only — no
 /// shell — so peer names containing quotes / backticks / shell metas
@@ -174,12 +210,22 @@ pub fn remove_filtering(iface: &str) -> Result<()> {
     Ok(())
 }
 
-/// Full rebuild from DB state. Single atomic `nft -f -` apply.
+/// Full rebuild from DB state. Single atomic `nft -f -` apply for the
+/// per-client chain; DNS lockdown gets its own atomic apply because its
+/// chains live in a different hook (prerouting vs. forward) and may
+/// or may not exist at this point.
+///
+/// DNS lockdown is rebuilt **first** so that even when the per-peer
+/// firewall is disabled (`firewall_enabled = false`) the lockdown still
+/// applies — the two settings are independent.
 pub fn rebuild_rules() -> Result<()> {
     let iface = crate::db::get_interface()?;
     let enable_ipv6 = !crate::config::CONFIG.disable_ipv6;
 
+    rebuild_dns_lockdown(&iface)?;
+
     if !iface.firewall_enabled {
+        // DNS lockdown lives in its own chain — leave it alone here.
         return remove_filtering(&iface.name);
     }
 
@@ -202,6 +248,227 @@ pub fn rebuild_rules() -> Result<()> {
     txn.push_str(&format!("add rule inet {TABLE} {CHAIN} drop\n"));
 
     nft_apply(&txn)
+}
+
+// ---------------------------------------------------------------------------
+// DNS lockdown
+// ---------------------------------------------------------------------------
+
+/// Address family of a parsed DNS-lockdown target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    V4,
+    V6,
+}
+
+/// Validate the operator-supplied target into a `(family, canonical-form)`
+/// pair. nft DNAT targets must be IP literals — hostnames would let
+/// runtime DNS state silently rewrite the redirect, which defeats the
+/// point of the lockdown. v6 literals are returned bare (without the
+/// `[]` wrappers) because nft writes them inline (`dnat ip6 to fd::1:53`).
+fn parse_target_ip(target: &str) -> Result<(Family, String)> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Err(anyhow!("DNS lockdown target is empty"));
+    }
+    // Reject anything obviously not an IP — single-label hostnames slip
+    // through Ipv4Addr::from_str rejection, so we additionally insist
+    // the string contains '.' or ':'.
+    if !(t.contains('.') || t.contains(':')) {
+        return Err(anyhow!(
+            "DNS lockdown target {t:?} is not an IP literal (hostnames disallowed)"
+        ));
+    }
+    if let Ok(v4) = t.parse::<std::net::Ipv4Addr>() {
+        return Ok((Family::V4, v4.to_string()));
+    }
+    // Strip surrounding brackets if the operator typed them.
+    let stripped = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(t);
+    if let Ok(v6) = stripped.parse::<std::net::Ipv6Addr>() {
+        return Ok((Family::V6, v6.to_string()));
+    }
+    Err(anyhow!("DNS lockdown target {t:?} is not a valid IPv4 or IPv6 literal"))
+}
+
+/// Build the `dns-prerouting` rule lines that DNAT every peer-originated
+/// :53/:853 packet to `target:53`. Pure function — returns the rule body
+/// (without the `add chain` header) so the caller assembles the full
+/// transaction. Each rule emits a `meta nfproto` guard so we don't ask
+/// nft to DNAT a v6 packet to a v4 target (or vice versa) — that would
+/// be rejected at apply time.
+fn dns_dnat_rules(iface: &str, family: Family, target: &str) -> Vec<String> {
+    // `inet` family chains can carry both v4 and v6 rules; `dnat ip to`
+    // is restricted to v4 packets, `dnat ip6 to` to v6 packets. The
+    // `meta nfproto` guard makes that explicit and keeps the rule from
+    // matching the wrong family.
+    let (nfproto, dnat_kw, dst) = match family {
+        Family::V4 => ("ipv4", "dnat ip to", target.to_string()),
+        Family::V6 => ("ipv6", "dnat ip6 to", target.to_string()),
+    };
+    // Send everything to :53 on the target — DoT (:853) is also
+    // rewritten to plain :53 so the lockdown resolver doesn't need a
+    // separate listener. Operators who run DoT-only resolvers can change
+    // this in a follow-up; today's wg-easy ecosystem assumes :53.
+    vec![
+        format!(
+            "add rule inet {TABLE} {DNS_NAT_CHAIN} \
+             iifname \"{iface}\" meta nfproto {nfproto} udp dport {{ 53, 853 }} {dnat_kw} {dst}:53"
+        ),
+        format!(
+            "add rule inet {TABLE} {DNS_NAT_CHAIN} \
+             iifname \"{iface}\" meta nfproto {nfproto} tcp dport {{ 53, 853 }} {dnat_kw} {dst}:53"
+        ),
+    ]
+}
+
+/// Build the `dns-lockdown` filter chain rules: accept legitimate
+/// (DNATed) traffic that already hits the target, then drop the rest of
+/// peer :53/:853 across both address families.
+fn dns_filter_rules(family: Family, target: &str) -> Vec<String> {
+    let (saddr_kw, dst) = match family {
+        Family::V4 => ("ip daddr", target.to_string()),
+        Family::V6 => ("ip6 daddr", target.to_string()),
+    };
+    vec![
+        // Already-DNATed packets land here with daddr == target — let
+        // them through ahead of the catch-all drop. Without this an
+        // operator who flipped block_external on would null-route their
+        // own redirect.
+        format!(
+            "add rule inet {TABLE} {DNS_FILTER_CHAIN} {saddr_kw} {dst} accept"
+        ),
+        // The actual leak guard. Drops anything still asking :53/:853
+        // anywhere else, regardless of address family — covers v6
+        // queries when the target is v4 (and vice versa).
+        format!("add rule inet {TABLE} {DNS_FILTER_CHAIN} udp dport {{ 53, 853 }} drop"),
+        format!("add rule inet {TABLE} {DNS_FILTER_CHAIN} tcp dport {{ 53, 853 }} drop"),
+    ]
+}
+
+/// Idempotently create the dns-prerouting nat chain. We only call this
+/// when DNS lockdown is enabled — the chain is removed when it goes
+/// off. Creating an empty nat-prerouting chain costs nothing at packet
+/// time, but leaving stale ones around clutters `nft list ruleset`.
+fn ensure_dns_chains(iface: &str, block_external: bool) -> Result<()> {
+    let iface = sanitize_iface(iface);
+    let mut txn = format!(
+        "add table inet {TABLE}\n\
+         add chain inet {TABLE} forward {{ type filter hook forward priority filter; policy accept; }}\n\
+         add chain inet {TABLE} {DNS_NAT_CHAIN} {{ type nat hook prerouting priority dstnat; policy accept; }}\n",
+    );
+    if block_external {
+        txn.push_str(&format!("add chain inet {TABLE} {DNS_FILTER_CHAIN}\n"));
+    }
+    nft_apply(&txn)?;
+
+    if !block_external {
+        // Make sure no stale jump points at a chain we won't populate;
+        // delete_dns_filter_jump is best-effort so this is safe even
+        // when the jump never existed.
+        let _ = delete_dns_filter_jump(&iface);
+        return Ok(());
+    }
+
+    // Add the forward jump for dns-lockdown if it isn't already there.
+    // Same idempotency dance as init_chain — `add rule` would otherwise
+    // append a duplicate every rebuild.
+    let listing = nft(&["list", "chain", "inet", TABLE, "forward"]).unwrap_or_default();
+    let want = format!("iifname \"{iface}\" jump {DNS_FILTER_CHAIN}");
+    if !listing.contains(&want) {
+        nft_apply(&format!(
+            "add rule inet {TABLE} forward iifname \"{iface}\" jump {DNS_FILTER_CHAIN}\n"
+        ))?;
+    }
+    Ok(())
+}
+
+/// Tear down both DNS chains and the forward-chain jump. Best-effort:
+/// the jump-handle delete swallows errors so a missing rule (already
+/// removed, never inserted) doesn't fail the call. Used both when DNS
+/// lockdown is toggled off and when the whole feature is disabled.
+fn remove_dns_lockdown(iface: &str) -> Result<()> {
+    let iface = sanitize_iface(iface);
+    delete_dns_filter_jump(&iface);
+    // `delete chain` requires the chain to be empty; flush first. Both
+    // commands tolerate the chain not existing (we use `add` semantics
+    // implicitly via `delete chain` — an absent chain produces a
+    // non-zero exit which we swallow).
+    let _ = nft_apply(&format!(
+        "flush chain inet {TABLE} {DNS_FILTER_CHAIN}\n\
+         delete chain inet {TABLE} {DNS_FILTER_CHAIN}\n"
+    ));
+    let _ = nft_apply(&format!(
+        "flush chain inet {TABLE} {DNS_NAT_CHAIN}\n\
+         delete chain inet {TABLE} {DNS_NAT_CHAIN}\n"
+    ));
+    Ok(())
+}
+
+/// Locate and delete the `forward → dns-lockdown` jump rule by handle.
+/// Mirrors the per-client jump cleanup in `remove_per_peer_filtering`.
+fn delete_dns_filter_jump(iface: &str) {
+    let listing = nft(&["--handle", "--numeric", "list", "chain", "inet", TABLE, "forward"])
+        .unwrap_or_default();
+    let mut deletions = String::new();
+    for line in listing.lines() {
+        let line = line.trim();
+        if line.contains(&format!("iifname \"{iface}\" jump {DNS_FILTER_CHAIN}")) {
+            if let Some(handle) = parse_handle(line) {
+                deletions.push_str(&format!(
+                    "delete rule inet {TABLE} forward handle {handle}\n"
+                ));
+            }
+        }
+    }
+    if !deletions.is_empty() {
+        let _ = nft_apply(&deletions);
+    }
+}
+
+/// Apply DNS lockdown to the running ruleset based on the interface row.
+/// When `dns_lockdown=false` or the target is empty, this is the same as
+/// `remove_dns_lockdown` — we tolerate either form of "off".
+pub fn rebuild_dns_lockdown(iface: &crate::db::Interface) -> Result<()> {
+    if !iface.dns_lockdown || iface.dns_lockdown_target.trim().is_empty() {
+        return remove_dns_lockdown(&iface.name);
+    }
+    let (family, target) = parse_target_ip(&iface.dns_lockdown_target)?;
+    let enable_ipv6 = !crate::config::CONFIG.disable_ipv6;
+    if family == Family::V6 && !enable_ipv6 {
+        return Err(anyhow!(
+            "DNS lockdown target is IPv6 but DISABLE_IPV6 is set; refusing to apply"
+        ));
+    }
+
+    ensure_dns_chains(&iface.name, iface.dns_block_external)?;
+
+    let iface_name = sanitize_iface(&iface.name);
+    let mut txn = String::new();
+    // Flush both chains before re-adding so a previous (different)
+    // target doesn't leave orphan rules behind.
+    txn.push_str(&format!("flush chain inet {TABLE} {DNS_NAT_CHAIN}\n"));
+    if iface.dns_block_external {
+        txn.push_str(&format!("flush chain inet {TABLE} {DNS_FILTER_CHAIN}\n"));
+    }
+    for r in dns_dnat_rules(&iface_name, family, &target) {
+        txn.push_str(&r);
+        txn.push('\n');
+    }
+    if iface.dns_block_external {
+        for r in dns_filter_rules(family, &target) {
+            txn.push_str(&r);
+            txn.push('\n');
+        }
+    }
+    nft_apply(&txn)?;
+    tracing::info!(
+        iface = %iface.name,
+        target = %target,
+        family = ?family,
+        block_external = iface.dns_block_external,
+        "DNS lockdown active: peer :53/:853 redirected"
+    );
+    Ok(())
 }
 
 fn append_client_rules(
@@ -620,6 +887,87 @@ mod tests {
     }
 
     #[test]
+    fn parse_target_ip_accepts_ipv4() {
+        let (fam, s) = parse_target_ip("10.2.0.100").unwrap();
+        assert_eq!(fam, Family::V4);
+        assert_eq!(s, "10.2.0.100");
+        // Whitespace tolerated.
+        let (fam, s) = parse_target_ip("  1.1.1.1  ").unwrap();
+        assert_eq!(fam, Family::V4);
+        assert_eq!(s, "1.1.1.1");
+    }
+
+    #[test]
+    fn parse_target_ip_accepts_ipv6_with_or_without_brackets() {
+        let (fam, s) = parse_target_ip("fd00::53").unwrap();
+        assert_eq!(fam, Family::V6);
+        assert_eq!(s, "fd00::53");
+        let (fam, s) = parse_target_ip("[2001:db8::1]").unwrap();
+        assert_eq!(fam, Family::V6);
+        assert_eq!(s, "2001:db8::1");
+    }
+
+    #[test]
+    fn parse_target_ip_rejects_hostname_and_empty() {
+        // Hostnames would let runtime DNS rewrite the redirect — defeats
+        // the lockdown's whole point. Reject them at config time.
+        assert!(parse_target_ip("dns.example.com").is_err());
+        assert!(parse_target_ip("localhost").is_err());
+        assert!(parse_target_ip("").is_err());
+        assert!(parse_target_ip("   ").is_err());
+        assert!(parse_target_ip("not-an-ip").is_err());
+        // 999.999 is a hostname-shaped string that contains '.' but
+        // isn't a valid v4 — must still be rejected.
+        assert!(parse_target_ip("999.999.999.999").is_err());
+    }
+
+    #[test]
+    fn dns_dnat_rules_v4_target_emits_v4_dnat_only() {
+        let rules = dns_dnat_rules("awg0", Family::V4, "10.2.0.100");
+        assert_eq!(rules.len(), 2);
+        for r in &rules {
+            assert!(r.contains("iifname \"awg0\""));
+            assert!(r.contains("meta nfproto ipv4"));
+            assert!(r.contains("dnat ip to 10.2.0.100:53"));
+            // dport set covers both classic DNS and DoT — operators who
+            // run a plain-text-only resolver still want :853 redirected
+            // to :53 rather than letting it leak.
+            assert!(r.contains("dport { 53, 853 }"));
+        }
+        // One UDP, one TCP — SQL injection of a third rule would be a
+        // regression worth catching.
+        assert!(rules.iter().any(|r| r.contains("udp dport")));
+        assert!(rules.iter().any(|r| r.contains("tcp dport")));
+    }
+
+    #[test]
+    fn dns_dnat_rules_v6_target_emits_v6_dnat_only() {
+        let rules = dns_dnat_rules("awg0", Family::V6, "fd00::53");
+        for r in &rules {
+            assert!(r.contains("meta nfproto ipv6"));
+            assert!(r.contains("dnat ip6 to fd00::53:53"));
+            assert!(!r.contains("dnat ip to"));
+        }
+    }
+
+    #[test]
+    fn dns_filter_rules_accept_target_then_drop_others() {
+        let rules = dns_filter_rules(Family::V4, "10.2.0.100");
+        // Order matters — accept must come before drop, otherwise the
+        // catch-all drop fires first and the redirect target is null-
+        // routed alongside everything else.
+        assert!(rules[0].contains("ip daddr 10.2.0.100 accept"));
+        assert!(rules[1].contains("udp dport { 53, 853 } drop"));
+        assert!(rules[2].contains("tcp dport { 53, 853 } drop"));
+    }
+
+    #[test]
+    fn dns_filter_rules_v6_uses_ip6_daddr() {
+        let rules = dns_filter_rules(Family::V6, "fd00::53");
+        assert!(rules[0].contains("ip6 daddr fd00::53 accept"));
+    }
+
+    #[test]
     fn legacy_compat_rule_set_covers_forward_and_input() {
         let rules = legacy_compat_rule_set("awg0", "51820");
         // Three rules: FORWARD-in, FORWARD-out, INPUT.
@@ -668,13 +1016,35 @@ mod tests {
 
         // Build a transaction that exercises every shape gen_rules can
         // emit (no port, port-with-explicit-proto, port-no-proto, both
-        // address families) plus the chain bootstrap from init_chain.
+        // address families) plus the chain bootstrap from init_chain
+        // AND the DNS-lockdown chains so a syntax regression in
+        // dns_dnat_rules / dns_filter_rules surfaces here.
         let mut txn = String::new();
         txn.push_str("add table inet awg-easy-rs-syntaxtest\n");
         txn.push_str(
             "add chain inet awg-easy-rs-syntaxtest forward { type filter hook forward priority filter; policy accept; }\n",
         );
         txn.push_str("add chain inet awg-easy-rs-syntaxtest wg-clients\n");
+        txn.push_str("add chain inet awg-easy-rs-syntaxtest dns-lockdown\n");
+        txn.push_str(
+            "add chain inet awg-easy-rs-syntaxtest dns-prerouting { type nat hook prerouting priority dstnat; policy accept; }\n",
+        );
+        // DNS lockdown rules — both families to catch v4/v6 syntax.
+        for r in dns_dnat_rules("awg0", Family::V4, "10.2.0.100") {
+            let r = r.replace("inet awg-easy-rs ", "inet awg-easy-rs-syntaxtest ");
+            txn.push_str(&r);
+            txn.push('\n');
+        }
+        for r in dns_dnat_rules("awg0", Family::V6, "fd00::53") {
+            let r = r.replace("inet awg-easy-rs ", "inet awg-easy-rs-syntaxtest ");
+            txn.push_str(&r);
+            txn.push('\n');
+        }
+        for r in dns_filter_rules(Family::V4, "10.2.0.100") {
+            let r = r.replace("inet awg-easy-rs ", "inet awg-easy-rs-syntaxtest ");
+            txn.push_str(&r);
+            txn.push('\n');
+        }
         // Rewrite TABLE to the test name so the rules land in the test table.
         let rules = vec![
             gen_rules("10.8.0.2", "8.8.8.8", None,           None,         "client 1: alice", false),

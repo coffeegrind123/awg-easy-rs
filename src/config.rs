@@ -27,6 +27,12 @@ pub struct Config {
     /// instead of extracting the bundled binary. Lets advanced operators
     /// track upstream Xray independently of awg-easy-rs releases.
     pub xray_binary_override: Option<String>,
+    /// Directory where the bundled DNS-stack ELFs (dnscrypt-proxy, tor,
+    /// lyrebird, snowflake, webtunnel) are extracted, plus generated
+    /// configs (`dnscrypt-proxy.toml`, `torrc`, etc.) and tor's data
+    /// directory. Defaults to `<wg_conf_dir>/dns`. Persist this on a
+    /// docker volume so binaries don't re-extract on every restart.
+    pub dns_dir: String,
 }
 
 pub fn get_env(key: &str, default: &str) -> String {
@@ -80,6 +86,8 @@ impl Config {
         let xray_dir =
             env::var("WG_EASY_XRAY_DIR").unwrap_or_else(|_| format!("{}/xray", wg_conf_dir));
         let xray_binary_override = env::var("XRAY_BIN_PATH").ok().filter(|s| !s.is_empty());
+        let dns_dir =
+            env::var("WG_EASY_DNS_DIR").unwrap_or_else(|_| format!("{}/dns", wg_conf_dir));
 
         Config {
             port,
@@ -100,6 +108,7 @@ impl Config {
             wg_binary: "awg".to_string(),
             xray_dir,
             xray_binary_override,
+            dns_dir,
         }
     }
 }

@@ -10,16 +10,33 @@ COPY Cargo.toml Cargo.lock* ./
 COPY build.rs ./build.rs
 COPY src/ ./src/
 COPY static/ ./static/
-# vendor/ holds the pinned Xray-core ELFs (amd64 + arm64, gzipped).
-# build.rs picks the matching arch and embeds it into the binary via
-# include_bytes!. The runtime extractor decompresses on first start.
+# vendor/ holds the pinned Xray-core ELF (amd64 only, gzipped) and,
+# when curated, the DNS-stack ELFs (dnscrypt-proxy, tor + PTs).
+# build.rs embeds them into the binary via include_bytes!. The
+# runtime extractor decompresses on first start. x86_64 only.
 COPY vendor/ ./vendor/
 
-# Build release binary. Strip is already set in [profile.release], but
-# we run it again here so the stripped binary is what gets COPY'd into
-# the runtime stage.
-RUN cargo build --release && \
-    strip target/release/awg-easy-rs
+# Build release binary as a fully static (interpreter-free) musl ELF.
+#
+# The three RUSTFLAGS below collaborate:
+#   +crt-static          — link the C runtime into the binary so no
+#                          .so files are needed at exec time.
+#   linker=musl-gcc      — use musl's wrapper around the system gcc.
+#                          Available in rust:alpine via `apk add musl-dev`.
+#   relocation-model=static
+#                        — disable PIE so the kernel doesn't look for
+#                          a PT_INTERP entry. Without this the binary
+#                          still declares /lib/ld-musl-x86_64.so.1 as
+#                          its interpreter and won't run on glibc-only
+#                          hosts (Debian / Ubuntu / RHEL).
+#
+# Result: `file` reports "statically linked" (no interpreter line) and
+# the binary runs unchanged on glibc, musl, or any other libc x86_64
+# Linux distro — verified by docker cp into debian:stable-slim.
+ENV RUSTFLAGS="-C target-feature=+crt-static -C linker=musl-gcc -C relocation-model=static"
+RUN cargo build --release --target x86_64-unknown-linux-musl && \
+    strip target/x86_64-unknown-linux-musl/release/awg-easy-rs && \
+    cp target/x86_64-unknown-linux-musl/release/awg-easy-rs /build/awg-easy-rs
 
 # Stage 2: Build amneziawg-go (needs Go >= 1.24)
 FROM golang:alpine AS awg-go-builder
@@ -62,8 +79,8 @@ RUN chmod +x /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go
 # Symlink amnezia config dir to wireguard
 RUN mkdir -p /etc/amnezia && ln -s /etc/wireguard /etc/amnezia/amneziawg
 
-# Copy the Rust binary
-COPY --from=builder /build/target/release/awg-easy-rs /usr/local/bin/awg-easy-rs
+# Copy the Rust binary (truly static, runs on any x86_64 libc).
+COPY --from=builder /build/awg-easy-rs /usr/local/bin/awg-easy-rs
 
 # Health check — verifies the web UI binary is responding. We deliberately
 # don't probe `awg show` here because a misconfigured WireGuard interface
