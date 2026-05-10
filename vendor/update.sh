@@ -427,8 +427,16 @@ update_tor() {
 set -e
 echo '=== apk packages ==='
 apk add --no-cache build-base wget openssl-dev openssl-libs-static \
-    libevent-dev libevent-static zlib-dev zlib-static linux-headers
+    libevent-dev libevent-static zlib-dev zlib-static linux-headers \
+    pkgconfig
 apk info -v openssl-libs-static libevent-static zlib-static build-base
+echo '=== static archives on disk ==='
+# Prior CI failure: --with-zlib-dir=/usr/lib was hardcoded but
+# alpine:3.20's zlib-static drops libz.a somewhere else. Print
+# the actual locations so autoconf's default search succeeds and
+# any future re-break has actionable diagnostics.
+find / -name 'libz.a' -o -name 'libssl.a' -o -name 'libcrypto.a' \
+    -o -name 'libevent.a' 2>/dev/null
 cd /tmp
 echo '=== fetching tor ${version} ==='
 wget -q https://dist.torproject.org/tor-${version}.tar.gz
@@ -437,10 +445,16 @@ sha256sum -c tor-${version}.tar.gz.sha256sum
 tar xzf tor-${version}.tar.gz
 cd tor-${version}
 echo '=== ./configure ==='
+# Drop the hardcoded --with-*-dir=/usr/lib args. They were
+# forcing autoconf to use literal /usr/lib/lib<x>.a paths in the
+# generated Makefiles, which fails when alpine renames or moves
+# package contents. Without them, configure uses pkg-config /
+# its own multi-path search and finds the static archives in
+# whatever standard location they live.
 ./configure --enable-static-tor \
-    --enable-static-openssl --with-openssl-dir=/usr/lib \
-    --enable-static-libevent --with-libevent-dir=/usr/lib \
-    --enable-static-zlib --with-zlib-dir=/usr/lib \
+    --enable-static-openssl \
+    --enable-static-libevent \
+    --enable-static-zlib \
     --disable-asciidoc --disable-html-manual --disable-manpage \
     --disable-systemd --disable-lzma --disable-zstd
 echo '=== make ==='
