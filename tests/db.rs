@@ -532,10 +532,16 @@ fn get_hooks_seeded() {
     seed();
     let hooks = db::get_hooks().unwrap();
     assert_eq!(hooks.id, "awg0");
-    // post_up should contain the default iptables rules
-    assert!(hooks.post_up.contains("MASQUERADE"));
-    // post_down uses iptables -D (delete) rules
-    assert!(hooks.post_down.contains("-D"));
+    // Native nftables defaults: PostUp creates the awg-easy-rs table and
+    // a masquerade rule; PostDown wipes the table atomically.
+    assert!(hooks.post_up.contains("nft "), "post_up must use nft");
+    assert!(hooks.post_up.contains("inet awg-easy-rs"));
+    assert!(hooks.post_up.contains("masquerade"));
+    assert!(hooks.post_down.contains("nft delete table inet awg-easy-rs"));
+    assert!(
+        !hooks.post_up.contains("iptables") && !hooks.post_down.contains("iptables"),
+        "default hooks must not reference iptables anymore"
+    );
 }
 
 #[test]

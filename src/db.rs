@@ -83,10 +83,6 @@ pub struct Interface {
     pub i3: String,
     pub i4: String,
     pub i5: String,
-    pub j1: String,
-    pub j2: String,
-    pub j3: String,
-    pub itime: i64,
     pub firewall_enabled: bool,
     /// Free-form text appended verbatim to the server `[Interface]` block.
     /// Mirrors amnezia-client's `additionalServerConfig` — escape hatch for
@@ -369,10 +365,6 @@ impl Interface {
             i3: row.get("i3")?,
             i4: row.get("i4")?,
             i5: row.get("i5")?,
-            j1: row.get("j1").unwrap_or_default(),
-            j2: row.get("j2").unwrap_or_default(),
-            j3: row.get("j3").unwrap_or_default(),
-            itime: row.get("itime").unwrap_or(0),
             firewall_enabled: int_to_bool(row.get::<_, i64>("firewall_enabled")?),
             // Older DBs may not have this column yet; tolerate it.
             additional_config: row.get("additional_config").unwrap_or_default(),
@@ -585,10 +577,6 @@ CREATE TABLE IF NOT EXISTS interfaces_table (
     i3                TEXT NOT NULL DEFAULT '',
     i4                TEXT NOT NULL DEFAULT '',
     i5                TEXT NOT NULL DEFAULT '',
-    j1                TEXT NOT NULL DEFAULT '',
-    j2                TEXT NOT NULL DEFAULT '',
-    j3                TEXT NOT NULL DEFAULT '',
-    itime             INTEGER NOT NULL DEFAULT 0,
     firewall_enabled  INTEGER NOT NULL DEFAULT 0,
     additional_config TEXT NOT NULL DEFAULT '',
     enabled           INTEGER NOT NULL DEFAULT 1,
@@ -745,27 +733,35 @@ CREATE TABLE IF NOT EXISTS xray_clients_table (
 // Hook templates
 // ---------------------------------------------------------------------------
 
+// Native nftables hooks. All rules live inside one `inet awg-easy-rs`
+// table so PostDown can wipe everything atomically with a single
+// `nft delete table`. Per-client filtering rules go into the empty
+// `wg-clients` chain — those are populated separately by `firewall.rs`
+// via `nft -f -` transactions when the firewall toggle is enabled.
+//
+// Forward-chain policy is `accept`. With no jump rules in place, all
+// traffic forwards as before. When firewall.rs adds the jumps, traffic
+// from the AWG interface diverts into `wg-clients`, hits per-peer
+// accept rules or the final `drop`, and only returns to forward (and
+// thus the accept policy) for explicitly-allowed flows.
 const POST_UP_TEMPLATE: &str = concat!(
-    "iptables -t nat -A POSTROUTING -s {{ipv4Cidr}} -o {{device}} -j MASQUERADE;",
-    " iptables -A INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " iptables -A FORWARD -i awg0 -j ACCEPT;",
-    " iptables -A FORWARD -o awg0 -j ACCEPT;",
-    " ip6tables -t nat -A POSTROUTING -s {{ipv6Cidr}} -o {{device}} -j MASQUERADE;",
-    " ip6tables -A INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " ip6tables -A FORWARD -i awg0 -j ACCEPT;",
-    " ip6tables -A FORWARD -o awg0 -j ACCEPT;",
+    "nft add table inet awg-easy-rs;",
+    " nft 'add chain inet awg-easy-rs forward { type filter hook forward priority filter; policy accept; }';",
+    " nft 'add chain inet awg-easy-rs nat-postrouting { type nat hook postrouting priority srcnat; }';",
+    " nft 'add chain inet awg-easy-rs filter-input { type filter hook input priority filter; policy accept; }';",
+    " nft 'add chain inet awg-easy-rs wg-clients';",
+    " nft add rule inet awg-easy-rs nat-postrouting ip saddr {{ipv4Cidr}} oifname \"{{device}}\" masquerade;",
+    " nft add rule inet awg-easy-rs nat-postrouting ip6 saddr {{ipv6Cidr}} oifname \"{{device}}\" masquerade;",
+    " nft add rule inet awg-easy-rs filter-input udp dport {{port}} accept;",
 );
 
-const POST_DOWN_TEMPLATE: &str = concat!(
-    "iptables -t nat -D POSTROUTING -s {{ipv4Cidr}} -o {{device}} -j MASQUERADE;",
-    " iptables -D INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " iptables -D FORWARD -i awg0 -j ACCEPT;",
-    " iptables -D FORWARD -o awg0 -j ACCEPT;",
-    " ip6tables -t nat -D POSTROUTING -s {{ipv6Cidr}} -o {{device}} -j MASQUERADE;",
-    " ip6tables -D INPUT -p udp -m udp --dport {{port}} -j ACCEPT;",
-    " ip6tables -D FORWARD -i awg0 -j ACCEPT;",
-    " ip6tables -D FORWARD -o awg0 -j ACCEPT;",
-);
+// One-line teardown: deleting the table atomically removes every chain
+// and every rule we added in PostUp, plus anything firewall.rs put in
+// the `wg-clients` chain. The `2>/dev/null || true` keeps awg-quick
+// from aborting interface bring-down if the table is already gone
+// (e.g. after a host reboot where state is lost but PostDown still runs).
+const POST_DOWN_TEMPLATE: &str =
+    "nft delete table inet awg-easy-rs 2>/dev/null || true";
 
 // ---------------------------------------------------------------------------
 // Initialisation
@@ -827,31 +823,26 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
             "DB migration: added user_configs_table.default_additional_config"
         );
     }
-    // Rename the interface row from `wg0` (upstream awg-easy / wg-easy default)
-    // to `awg0` to match the AmneziaWG-native naming. Idempotent — only fires
-    // when an old `wg0` row is present and no `awg0` row exists yet.
-    let needs_rename: bool = conn
+    // One-shot: replace the iptables-flavoured default hooks from earlier
+    // versions with the native nftables equivalents. Only fires when the
+    // stored post_up still contains "iptables" — operators who already
+    // customised their hooks (with `nft`, with no commands, etc.) get
+    // left alone. Idempotent because we re-check on every boot.
+    let needs_nft_hooks: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM interfaces_table WHERE name = 'wg0') \
-             AND NOT EXISTS(SELECT 1 FROM interfaces_table WHERE name = 'awg0')",
+            "SELECT EXISTS(SELECT 1 FROM hooks_table \
+             WHERE id = 'awg0' AND post_up LIKE '%iptables%')",
             [],
             |r| r.get::<_, i64>(0).map(|v| v != 0),
         )
         .unwrap_or(false);
-    if needs_rename {
-        conn.execute_batch(
-            "UPDATE interfaces_table SET name = 'awg0' WHERE name = 'wg0';\
-             UPDATE hooks_table SET id = 'awg0' WHERE id = 'wg0';\
-             UPDATE user_configs_table SET id = 'awg0' WHERE id = 'wg0';\
-             UPDATE hooks_table SET \
-               post_up = REPLACE(post_up, 'wg0', 'awg0'), \
-               post_down = REPLACE(post_down, 'wg0', 'awg0'), \
-               pre_up = REPLACE(pre_up, 'wg0', 'awg0'), \
-               pre_down = REPLACE(pre_down, 'wg0', 'awg0') \
-             WHERE id = 'awg0';",
+    if needs_nft_hooks {
+        conn.execute(
+            "UPDATE hooks_table SET post_up = ?1, post_down = ?2 WHERE id = 'awg0'",
+            params![POST_UP_TEMPLATE, POST_DOWN_TEMPLATE],
         )?;
         tracing::info!(
-            "DB migration: renamed interface wg0 -> awg0 (interfaces_table, hooks_table, user_configs_table)"
+            "DB migration: replaced legacy iptables hooks with native nftables defaults"
         );
     }
     Ok(())
@@ -1076,7 +1067,7 @@ const VALID_INTERFACE_COLUMNS: &[&str] = &[
     "name", "device", "port", "private_key", "public_key", "ipv4_cidr", "ipv6_cidr",
     "mtu", "j_c", "j_min", "j_max", "s1", "s2", "s3", "s4",
     "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
-    "j1", "j2", "j3", "itime", "firewall_enabled", "additional_config", "enabled",
+    "firewall_enabled", "additional_config", "enabled",
 ];
 
 pub fn update_interface(fields: &UpdateMap) -> Result<()> {

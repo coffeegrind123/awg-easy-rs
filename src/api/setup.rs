@@ -5,7 +5,6 @@
 //! | POST   | /api/setup/2       | Create admin user              |
 //! | GET    | /api/setup/4       | Get IP info for host selection |
 //! | POST   | /api/setup/4       | Set host and port              |
-//! | POST   | /api/setup/migrate | Migrate/re-initialise data     |
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -14,7 +13,7 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{api_err, map_err, ok_success, require_auth, AppState};
+use super::{api_err, map_err, require_auth, AppState};
 use crate::{auth, db};
 
 // ---------------------------------------------------------------------------
@@ -166,153 +165,6 @@ pub async fn setup_step4_post(
     db::set_setup_step(0).map_err(map_err)?;
 
     Ok(Json(json!({ "success": true, "step": 0 })))
-}
-
-// ---------------------------------------------------------------------------
-// POST /api/setup/migrate — import a v3 wg-easy backup file
-// ---------------------------------------------------------------------------
-//
-// Mirrors the original Node.js handler. The body is `{ file: "<json string>" }`,
-// where the JSON string contains:
-//
-//   {
-//     "server": { "privateKey": "...", "publicKey": "...", "address": "10.8.0.1" },
-//     "clients": {
-//       "<id>": { "name": "...", "address": "10.8.0.2", "privateKey": "...",
-//                 "publicKey": "...", "preSharedKey": "...",
-//                 "createdAt": "...", "updatedAt": "...", "enabled": true }
-//     }
-//   }
-//
-// We reset the interface keypair to the legacy values, derive the IPv4 CIDR
-// from the server address (assumed `/24`), assign each client a fresh IPv6
-// from the standard fdcc::/112 pool, and persist them via `createFromExisting`
-// semantics. Setup is then marked complete.
-//
-// Auth: the handler is only callable while setup is unfinished (`setup_step
-// != 0`). Once setup is done, an authenticated admin must call it.
-
-#[derive(Deserialize)]
-pub struct SetupMigrateRequest {
-    pub file: String,
-}
-
-#[derive(Deserialize)]
-struct LegacyServer {
-    #[serde(rename = "privateKey")]
-    private_key: String,
-    #[serde(rename = "publicKey")]
-    public_key: String,
-    address: String,
-}
-
-#[derive(Deserialize)]
-struct LegacyClient {
-    name: String,
-    address: String,
-    #[serde(rename = "privateKey")]
-    private_key: String,
-    #[serde(rename = "publicKey")]
-    public_key: String,
-    #[serde(rename = "preSharedKey")]
-    pre_shared_key: String,
-    #[serde(default)]
-    enabled: bool,
-}
-
-#[derive(Deserialize)]
-struct LegacyConfig {
-    server: LegacyServer,
-    clients: std::collections::HashMap<String, LegacyClient>,
-}
-
-pub async fn setup_migrate(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    body: Option<Json<SetupMigrateRequest>>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let setup_step = db::get_setup_step().unwrap_or(0);
-    if setup_step == 0 {
-        let user = require_auth(&jar, &state)?;
-        if user.role < 1 {
-            return Err(api_err(StatusCode::FORBIDDEN, "Admin access required"));
-        }
-    }
-
-    // No body / no file: legacy behaviour — just resave the config.
-    let file = match body.and_then(|Json(b)| if b.file.is_empty() { None } else { Some(b.file) }) {
-        Some(f) => f,
-        None => {
-            crate::wg::save_config().map_err(map_err)?;
-            return Ok(ok_success());
-        }
-    };
-
-    let cfg: LegacyConfig = serde_json::from_str(&file).map_err(|_| {
-        api_err(StatusCode::BAD_REQUEST, "Invalid config JSON")
-    })?;
-
-    // Re-key the interface with the supplied keypair.
-    db::update_key_pair(&cfg.server.public_key, &cfg.server.private_key)
-        .map_err(map_err)?;
-
-    // Derive a /24 around the server address.
-    let server_ip: std::net::Ipv4Addr = cfg.server.address.parse().map_err(|_| {
-        api_err(
-            StatusCode::BAD_REQUEST,
-            "server.address must be an IPv4 address",
-        )
-    })?;
-    let octets = server_ip.octets();
-    let v4_cidr = format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]);
-    let v6_cidr = "fdcc:ad94:bacf:61a4::cafe:0/112".to_string();
-    db::update_cidr(&v4_cidr, &v6_cidr).map_err(map_err)?;
-
-    // Recreate each client with its original keys/IPv4, allocating IPv6.
-    let mut used_v6: Vec<String> = Vec::new();
-    for (_, client) in cfg.clients.iter() {
-        let v6 = db::next_ipv6(&v6_cidr, &used_v6).map_err(map_err)?;
-        used_v6.push(v6.clone());
-        let params = db::CreateClientParams {
-            user_id: None,
-            interface_id: Some("awg0".into()),
-            name: client.name.clone(),
-            ipv4_address: Some(client.address.clone()),
-            ipv6_address: Some(v6),
-            private_key: client.private_key.clone(),
-            public_key: client.public_key.clone(),
-            pre_shared_key: Some(client.pre_shared_key.clone()),
-            pre_up: None,
-            post_up: None,
-            pre_down: None,
-            post_down: None,
-            expires_at: None,
-            allowed_ips: None,
-            server_allowed_ips: None,
-            firewall_ips: None,
-            persistent_keepalive: 0,
-            mtu: 1420,
-            j_c: None,
-            j_min: None,
-            j_max: None,
-            i1: None,
-            i2: None,
-            i3: None,
-            i4: None,
-            i5: None,
-            dns: None,
-            server_endpoint: None,
-            // Imported v3 backup → keep default opt-in (pure AmneziaWG).
-            advanced_security: Some(true),
-            enabled: client.enabled,
-        };
-        db::create_client(&params).map_err(map_err)?;
-    }
-
-    db::set_setup_step(0).map_err(map_err)?;
-    crate::wg::save_config().map_err(map_err).ok();
-
-    Ok(Json(json!({ "success": true })))
 }
 
 // ---------------------------------------------------------------------------

@@ -65,11 +65,6 @@ pub fn generate_server_interface(iface: &db::Interface, hooks: &db::Hooks) -> Re
     if !iface.i3.is_empty() { awg.push(format!("I3 = {}", iface.i3)); }
     if !iface.i4.is_empty() { awg.push(format!("I4 = {}", iface.i4)); }
     if !iface.i5.is_empty() { awg.push(format!("I5 = {}", iface.i5)); }
-    // J1/J2/J3/Itime are NOT in the canonical AmneziaWG 2.0 spec —
-    // amneziawg-tools/src/config.c does not parse them and awg-quick will
-    // reject the resulting file with `Unknown key`. We keep the DB columns
-    // for drop-in compatibility with upstream awg-easy DBs but never emit
-    // them to disk.
 
     // Free-form append (mirrors amnezia-client's additionalServerConfig).
     // Lives at the bottom of the [Interface] block, just before [Peer]s
@@ -298,8 +293,6 @@ mod tests {
             h3: "400-500".into(), h4: "600-700".into(),
             i1: String::new(), i2: String::new(), i3: String::new(),
             i4: String::new(), i5: String::new(),
-            j1: String::new(), j2: String::new(), j3: String::new(),
-            itime: 0,
             firewall_enabled: false,
             additional_config: String::new(),
             enabled: true,

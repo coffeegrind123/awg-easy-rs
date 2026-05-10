@@ -9,9 +9,9 @@ Two protocols on one server, switchable per peer:
 
 Both modes share the same admin UI, user accounts, session/auth, and SQLite DB.
 
-- **Drop-in DB compatible** with upstream awg-easy (`/etc/wireguard/wg-easy.db`); stop the old container, start this one against the same volume.
 - **~18 MB stripped release binary** (was ~3 MB before Xray; bundled Xray-core ELF accounts for ~13 MB of that).
 - **252 tests** (DB, auth, security, API, AmneziaWG kernel-parity, Xray Reality e2e).
+- **Native nftables firewall** — single `inet awg-easy-rs` table with atomic transactions; no iptables.
 
 ---
 
@@ -25,8 +25,8 @@ Both modes share the same admin UI, user accounts, session/auth, and SQLite DB.
 | **Share formats** | AmneziaWG: `.conf` file, QR, one-time link. Xray: `vless://` URL (with both `spx` and `spiderX` for max compat), QR, native Amnezia-format JSON. |
 | **Auth** | Argon2id password hashing, server-side session cookies (`SameSite=Strict`, `HttpOnly`, `Secure` unless `INSECURE=true`). Per-username (10/min) **and** per-source-IP (50/min) login rate limit. Constant-time username-not-found path (no enumeration via timing). |
 | **2FA / TOTP** | Server-generated 20-byte secrets, RFC 6238 verification, separate 5/5min rate limit on TOTP code attempts. `setup` / `create` / `delete` API contract. |
-| **Setup wizard** | 4-step first-run flow. v3 backup-file migration (`POST /api/setup/migrate`) accepts the original Node.js `wg-easy` JSON export. `INIT_ENABLED` env-var auto-setup for Kubernetes/CI deployments. |
-| **Per-client firewall** | iptables/ip6tables `WG_CLIENTS` chain with `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild. (AmneziaWG side; Xray multiplexes through one socket so per-peer iptables filtering doesn't apply.) |
+| **Setup wizard** | 4-step first-run flow. `INIT_ENABLED` env-var auto-setup for Kubernetes/CI deployments. |
+| **Per-client firewall** | Native nftables `wg-clients` chain inside the `inet awg-easy-rs` table. `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild via a single `nft -f -` transaction. (AmneziaWG side; Xray multiplexes through one socket so per-peer filtering doesn't apply.) |
 | **Metrics** | `/metrics/json` and `/metrics/prometheus`, gated by hashed Bearer token (when `metricsPassword` is set). Exposes per-peer rx/tx, last-handshake, online state. |
 | **Operational** | Background cron expires clients/one-time-links every 60 s. `/health` endpoint (always 200). Persistent SQLite (WAL mode, foreign keys on). Idempotent schema migrations. |
 
@@ -167,22 +167,11 @@ If you really must run without a proxy on a trusted network: set `INSECURE=true`
 
 ---
 
-## Migrating from upstream `awg-easy` (Node.js)
+## Upgrades
 
-The Rust port uses the same SQLite schema. Two paths:
+awg-easy-rs is a **standalone project** — not a drop-in for upstream `awg-easy` (Node.js) or `wg-easy`. It runs against its own SQLite database at `/etc/wireguard/wg-easy.db` (path kept for our own historical compat; override via `WG_EASY_DB_PATH`).
 
-**Live volume swap (recommended):**
-
-```bash
-docker stop awg-easy-node
-docker compose up -d   # awg-easy-rs binds to the same /etc/wireguard volume
-```
-
-The startup migration adds the new `clients_table.advanced_security` column on first boot — no manual DDL. Existing peers migrate to `advanced_security = NULL` (kernel auto-detect from H1 magic header), which is the safe default.
-
-**Backup-file import:**
-
-If you prefer a clean install: while still in the setup wizard (`setup_step != 0`), POST the legacy `{file: "<json export>"}` body to `/api/setup/migrate`. The handler re-keys the interface, allocates fresh IPv6 addresses for each client, and marks setup complete.
+For upgrades between awg-easy-rs versions, idempotent `ALTER TABLE` migrations apply on first boot; no manual DDL.
 
 ---
 
@@ -245,13 +234,17 @@ sudo ./target/release/awg-easy-rs
      │ Gaming mode                           │ Browsing mode
      │ argv-only Command::new()              │ tokio::process::Child
      ▼                                       ▼
-  awg / awg-quick / iptables               xray (extracted to
+  awg / awg-quick / nft                    xray (extracted to
      │                                     <xray_dir>/xray, SIGHUP
      ▼                                     reload, SIGTERM shutdown)
   AmneziaWG kernel module                    │
   (or amneziawg-go userspace)                ▼
                                           VLESS + Reality + Vision
                                           listener on TCP/443
+
+  Firewall: single `inet awg-easy-rs` nftables table holding
+  forward / nat-postrouting / filter-input / wg-clients chains.
+  PostUp creates it, PostDown deletes it atomically.
 ```
 
 ### Source layout
@@ -265,7 +258,7 @@ src/
                    # (interfaces, clients, xray_inbound, xray_clients, …)
   auth.rs          # Argon2id wrappers, SHA-256, session-token gen
   qr.rs            # SVG QR codes
-  firewall.rs      # iptables WG_CLIENTS chain
+  firewall.rs      # native nftables; manages inet awg-easy-rs / wg-clients chain
   wg/              # — Gaming mode (AmneziaWG) —
     cli.rs         # argv-only awg/awg-quick wrappers
     params.rs      # AmneziaWG param generation + CPS tag validator
@@ -307,7 +300,7 @@ build.rs                # picks the matching vendor blob per target arch
 - **CSRF**: relies on `SameSite=Strict` cookie + JSON-only request bodies. JSON content-type forces a CORS preflight, which a cross-site form submit cannot satisfy.
 - **CSP**: `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'`. The two `'unsafe-inline'` allowances are required by inline `onclick=` event handlers in the embedded SPA.
 - **Privilege model**: role 0 = client (sees only their own peers, cannot edit IPs/AllowedIPs/DNS/MTU/AWG params/server-endpoint of any client), role 1 = admin.
-- **Command execution**: every shell-out for `awg`/`awg-quick`/`iptables` uses argv-style `Command::new(...).args(...)`. No `bash -c` with user-tainted arguments. Interface names are validated against `[A-Za-z0-9_-]{1,15}` before any command call.
+- **Command execution**: every shell-out for `awg`/`awg-quick`/`nft` uses argv-style `Command::new(...).args(...)`. No `bash -c` with user-tainted arguments. nftables transactions are piped to `nft -f -` via stdin (still argv-only) so peer names containing quotes / backticks / shell metas can never escape into command interpretation. Interface names are validated against `[A-Za-z0-9_-]{1,15}` before any command call.
 - **Metrics**: SHA-256 of the configured `metricsPassword` is stored, never the cleartext. Endpoints use constant-time comparison.
 
 If you find a security issue, please open an issue marked `security`.

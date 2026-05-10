@@ -420,10 +420,6 @@ pub async fn get_interface(
     let _admin = require_admin(&jar, &state)?;
     let iface = db::get_interface().map_err(map_err)?;
 
-    // Note: j1/j2/j3/itime exist as DB columns for drop-in upstream
-    // compatibility but are intentionally NOT surfaced to the UI — they are
-    // not parsed by awg/awg-quick/the kernel module, so editing them would
-    // mislead the user and break interface bring-up if non-empty.
     Ok(Json(json!({
         "name": iface.name,
         "device": iface.device,
@@ -494,9 +490,6 @@ pub async fn update_interface(
             ("i4", "i4"),
             ("i5", "i5"),
             ("additionalConfig", "additional_config"),
-            // j1/j2/j3/itime are intentionally NOT accepted — see comment on
-            // get_interface() above. Even if a client POSTs them, we drop
-            // the values silently to avoid future-broken configs.
             ("device", "device"),
         ];
         for (json_key, db_key) in &mappings {

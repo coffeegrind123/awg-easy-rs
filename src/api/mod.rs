@@ -114,7 +114,6 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(setup::setup_step4_get)
                 .post(setup::setup_step4_post),
         )
-        .route("/setup/migrate", axum::routing::post(setup::setup_migrate))
         // Clients
         .route(
             "/client",

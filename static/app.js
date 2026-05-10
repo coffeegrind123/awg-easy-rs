@@ -1059,8 +1059,8 @@ async function showAdminTab(tab, e) {
                     <span class="toggle-track"></span>
                   </label>
                   <div>
-                    <label class="field-label" for="adm-if-firewall" title="Restrict each client to only access their allowed IPs via iptables rules. Requires iptables installed">Per-client firewall</label>
-                    <p class="field-help">iptables rules per peer based on their allowed-IPs.</p>
+                    <label class="field-label" for="adm-if-firewall" title="Restrict each client to only access their allowed IPs via the wg-clients nftables chain. Requires nft installed">Per-client firewall</label>
+                    <p class="field-help">nftables rules per peer (in the <span class="mono">wg-clients</span> chain) based on their allowed-IPs.</p>
                   </div>
                 </div>
               </div>
@@ -1216,7 +1216,7 @@ async function showAdminTab(tab, e) {
                   <textarea id="adm-hook-predown" rows="3" placeholder="(empty)">${esc(hooks.preDown || '')}</textarea>
                 </div>
                 <div class="field">
-                  <label class="field-label" for="adm-hook-postdown" title="Commands run AFTER the interface goes down. Default removes iptables NAT and forwarding rules">PostDown</label>
+                  <label class="field-label" for="adm-hook-postdown" title="Commands run AFTER the interface goes down. Default deletes the inet awg-easy-rs nftables table (atomic teardown of all NAT, forwarding, and per-client rules)">PostDown</label>
                   <textarea id="adm-hook-postdown" rows="4">${esc(hooks.postDown || '')}</textarea>
                 </div>
               </div>

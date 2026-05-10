@@ -1108,78 +1108,6 @@ async fn admin_general_get_does_not_leak_metrics_password() {
 // Migrate endpoint accepts a v3-format backup file
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-#[serial(db)]
-async fn setup_migrate_imports_legacy_clients() {
-    seed();
-    // Setup is incomplete — migrate is publicly callable.
-    db::set_setup_step(2).unwrap();
-    let app = router();
-
-    let payload = serde_json::json!({
-        "server": {
-            "privateKey": "PRIV-from-v3",
-            "publicKey":  "PUB-from-v3",
-            "address":    "10.7.0.1"
-        },
-        "clients": {
-            "abc": {
-                "name": "imported-client",
-                "address": "10.7.0.2",
-                "privateKey": "client-priv",
-                "publicKey": "client-pub",
-                "preSharedKey": "client-psk",
-                "createdAt": "2024-01-01T00:00:00Z",
-                "updatedAt": "2024-01-01T00:00:00Z",
-                "enabled": true
-            }
-        }
-    });
-    let body = json!({ "file": serde_json::to_string(&payload).unwrap() });
-
-    // No cookie required during setup.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/setup/migrate")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let clients = db::get_all_clients().unwrap();
-    assert_eq!(clients.len(), 1);
-    assert_eq!(clients[0].name, "imported-client");
-    assert_eq!(clients[0].ipv4_address.as_deref(), Some("10.7.0.2"));
-    assert_eq!(clients[0].public_key, "client-pub");
-
-    let iface = db::get_interface().unwrap();
-    assert_eq!(iface.private_key, "PRIV-from-v3");
-    assert_eq!(iface.public_key, "PUB-from-v3");
-    assert_eq!(iface.ipv4_cidr, "10.7.0.0/24");
-
-    // Setup is now complete.
-    assert_eq!(db::get_setup_step().unwrap(), 0);
-}
-
-#[tokio::test]
-#[serial(db)]
-async fn setup_migrate_rejects_invalid_json_payload() {
-    seed();
-    db::set_setup_step(2).unwrap();
-    let app = router();
-
-    let body = json!({ "file": "{not-valid-json" });
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/setup/migrate")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
 // ---------------------------------------------------------------------------
 // AmneziaWG 2.0 spec compliance
 // ---------------------------------------------------------------------------
@@ -1273,48 +1201,6 @@ async fn admin_interface_caps_jmax_at_1279() {
     let body = json!({ "jMax": 1279, "jMin": 10 });
     let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
     assert_eq!(status, StatusCode::OK);
-}
-
-#[tokio::test]
-#[serial(db)]
-async fn admin_interface_drops_j1_j2_j3_itime_on_post() {
-    seed();
-    create_user("admin", "adminpass", 1);
-    let app = router();
-    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
-
-    // These keys are no longer accepted — the request still succeeds (we
-    // silently drop them) but the DB row must remain at its seeded default.
-    let body = json!({
-        "j1": "junk-j1",
-        "j2": "junk-j2",
-        "j3": "junk-j3",
-        "itime": 42
-    });
-    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let iface = db::get_interface().unwrap();
-    assert!(iface.j1.is_empty());
-    assert!(iface.j2.is_empty());
-    assert!(iface.j3.is_empty());
-    assert_eq!(iface.itime, 0);
-}
-
-#[tokio::test]
-#[serial(db)]
-async fn admin_interface_get_does_not_surface_j_fields() {
-    seed();
-    create_user("admin", "adminpass", 1);
-    let app = router();
-    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
-
-    let (status, body) = get_req(&app, "/api/admin/interface", &cookie).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.get("j1").is_none(), "j1 must not be exposed via GET");
-    assert!(body.get("j2").is_none(), "j2 must not be exposed via GET");
-    assert!(body.get("j3").is_none(), "j3 must not be exposed via GET");
-    assert!(body.get("itime").is_none(), "itime must not be exposed via GET");
 }
 
 #[tokio::test]

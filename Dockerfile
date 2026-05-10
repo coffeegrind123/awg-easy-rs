@@ -42,10 +42,11 @@ RUN git clone https://github.com/amnezia-vpn/amneziawg-tools.git && \
 FROM alpine:3.21
 WORKDIR /app
 
-# Install runtime dependencies (nftables-backed iptables)
+# Install runtime dependencies. We use nftables natively now —
+# `iptables` is no longer installed since we don't shell out to it.
+# nftables comes from the `nftables` package and provides the `nft` CLI.
 RUN apk add --no-cache \
     bash \
-    iptables \
     nftables \
     kmod \
     wireguard-tools \
