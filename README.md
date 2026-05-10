@@ -2,15 +2,16 @@
 
 A standalone, single-binary VPN + censorship-resistant proxy manager with a built-in web UI. Pure Rust port of [wg-easy](https://github.com/wg-easy/wg-easy) / [awg-easy](https://github.com/coffeegrind123/awg-easy) — no Node.js, no npm, no JS toolchain in the container.
 
-Three transports + an optional bundled resolver, all sharing one admin UI, user accounts, session/auth, and SQLite DB:
+Four transports + an optional bundled resolver, all sharing one admin UI, user accounts, session/auth, and SQLite DB:
 
 - **Gaming mode** — [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) (obfuscated WireGuard over UDP). Low-latency, full-tunnel.
 - **Browsing mode** — [Xray](https://github.com/XTLS/Xray-core) VLESS + Reality + Vision over TCP/443. Camouflaged as a real TLS connection to a public CDN host. Browser-friendly. (Reality and Vision are Xray-core extensions and don't exist outside it.)
 - **Telegram MTProxy** — [telemt](https://github.com/telemt/telemt) Fake-TLS / SNI fronting (the `secret=ee<…>` link variant). Per-user 32-hex secrets, optional traffic masking. Tokio-supervised; users are reconciled into telemt's `127.0.0.1:9091` HTTP control plane on every spawn.
+- **DNS-tunnel mode** — [MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN) DNS-over-DNS tunnel: clients pack encrypted TCP/SOCKS5 traffic into DNS queries through public resolvers, the server listens on UDP/53 for tunnel envelopes (via NS-delegated subdomain) and re-emits the inner TCP through SOCKS5 or a fixed TCP forwarder. Survives total egress blackouts where only DNS is allowed.
 - **DNS bundle (optional)** — bundled [dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) with optional [tor](https://www.torproject.org/) + lyrebird/snowflake/webtunnel pluggable transports for DoH/DNSCrypt egress, plus an nftables `dns-prerouting` DNAT chain that catches peer-side `:53/:853` leaks before they reach the WAN.
 
-- **~18 MB stripped release binary** (musl-static, distro-agnostic — runs unchanged on glibc, musl, or any other libc x86_64 host). Bundled Xray accounts for ~13 MB; telemt adds ~6 MB; the DNS bundle adds another ~20 MB when curated.
-- **140+ unit + integration tests** (DB, auth, security, API, AmneziaWG kernel-parity, Xray Reality e2e, telemt config-gen smoke).
+- **~20 MB stripped release binary** (musl-static, distro-agnostic — runs unchanged on glibc, musl, or any other libc x86_64 host). Bundled Xray accounts for ~13 MB; telemt adds ~6 MB; MasterDnsVPN adds ~2 MB; the DNS bundle adds another ~20 MB when curated.
+- **400+ unit + integration tests** (DB, auth, security, API, AmneziaWG kernel-parity, Xray Reality e2e, telemt + MasterDnsVPN config-gen smoke).
 - **Native nftables firewall** — single `inet awg-easy-rs` table with atomic transactions. Transparent compat shim for hosts still on `iptables-legacy`: detected at startup, three FORWARD/INPUT accept rules mirrored into the legacy backend, removed on graceful shutdown.
 
 ---
@@ -22,15 +23,16 @@ Three transports + an optional bundled resolver, all sharing one admin UI, user 
 | **AmneziaWG 2.0 (Gaming)** | Full obfuscation set: `Jc / Jmin / Jmax`, `S1‑S4`, `H1‑H4` (with non-overlapping ranges), `I1‑I5` (with CPS tag-grammar validation: `<b 0xHEX>`, `<r N>`, `<rc N>`, `<rd N>`, `<t>`, `<c>`). Per-peer `AdvancedSecurity` opt-in (on / off / auto-detect from H1 magic header). |
 | **Xray VLESS+Reality+Vision (Browsing)** | Bundled Xray-core v26.3.27 ELF (vendored, gzipped, SHA-verified, ~13 MB compressed). Vision flow hardcoded. Per-client UUID **and** per-client `shortId` (revocable individually). TLS 1.3 dest probe with SAN-match enforcement (rejects burned-IP / private-CN destinations before save). Tokio-supervised subprocess: SIGHUP reload, SIGTERM+10s grace shutdown, capped exponential backoff on crash. Free-form `additional_config` JSON deep-merged into the inbound. |
 | **Telegram MTProxy** | Bundled [telemt](https://github.com/telemt/telemt) v3.4.11 ELF (vendored, gzipped, SHA-verified, ~6 MB compressed). Fake-TLS / SNI fronting (`secret=ee<…>` link variant), per-user 32-hex secrets, optional `dd`-prefix and classic modes, traffic masking. Tokio-supervised subprocess; users live durably in the awg-easy-rs DB and reconcile into telemt's `127.0.0.1:9091` HTTP control plane after every spawn so a telemt state-file wipe doesn't lose the operator's roster. `tg://proxy?…` share links rendered server-side, QR via `qr.rs`. |
+| **MasterDnsVPN (DNS-tunnel)** | Bundled [MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN) v2026.05.10 ELF (vendored, gzipped, SHA-verified, ~2 MB compressed). Encryption: XOR / ChaCha20 / AES-128/192/256-GCM (selectable). SOCKS5 or fixed-TCP forwarding. Per-client bookkeeping (display name, custom resolver list, local SOCKS5 port, expiry) — but every client uses the same singleton encryption key (a property of the underlying protocol). Share format: downloadable `client_config.toml` + `client_resolvers.txt`, plus a `mdnsvpn://b64?<base64>` single-string variant for `mdnsvpn -json_base64`. **Requires** the operator to own a domain and create an `NS` delegation to this server. |
 | **DNS bundle (optional)** | Bundled `dnscrypt-proxy` 2.1.15 + `tor` 0.4.9.8 + `lyrebird` 0.8.1 (obfs4) + `snowflake` v2.13.1 + `webtunnel` v0.0.4 — ~20 MB additional, curated as static-musl ELFs. Off by default; tor stays off independent of the dnscrypt-proxy master switch. Pairs with an nftables `dns-prerouting` chain that DNATs every peer `:53/:853` UDP+TCP packet to the configured resolver, plus an optional `dns-lockdown` filter chain that drops residual external DNS — gives belt-and-braces leak prevention even when the WireGuard `DNS = …` line is honored only loosely by the client. |
 | **Build & release** | Vendored binary blobs (`vendor/*.gz`) are CI artifacts, **not committed**. `vendor/*_VERSION` pin files (versions + SHA-256) are the audited spec. `scripts/build.sh` materialises the blobs from the pin files and produces a fully static `x86_64-unknown-linux-musl` ELF locally; `.github/workflows/build-release.yml` runs the same flow in CI on every push to `main` (or manually) and publishes a release with the binary, SHA-256, and a per-component versions table. |
 | **Target** | x86_64 Linux only. arm64 was dropped intentionally — see `vendor/README.md` for the rationale. |
-| **Web UI** | Single embedded SPA (HTML + `app.js`). Top-nav Gaming / Browsing toggle, plus admin sub-tabs for Telegram (MTProxy) and DNS bundle. Live transfer rates (AmneziaWG side), QR codes, one-time download links, admin panels for interface / hooks / general / user-config / Xray inbound / MTProxy inbound + users / DNS bundle. Inline guidance on which client app eats which share format (Amnezia VPN, v2rayN, v2rayNG, NekoBox, Hiddify, Streisand, Shadowrocket, FoXray, Telegram desktop / mobile). |
-| **Share formats** | AmneziaWG: `.conf` file, QR, one-time link. Xray: `vless://` URL (with both `spx` and `spiderX` for max compat), QR, native Amnezia-format JSON. Telegram: `tg://proxy?…&secret=ee<…>` link (Fake-TLS) + `dd`-prefix and classic variants for the same user, QR. |
+| **Web UI** | Single embedded SPA (HTML + `app.js`). Top-nav Gaming / Browsing toggle, plus admin sub-tabs for Telegram (MTProxy), DNS Tunnel (MasterDnsVPN), and DNS bundle. Live transfer rates (AmneziaWG side), QR codes, one-time download links, admin panels for interface / hooks / general / user-config / Xray inbound / MTProxy inbound + users / DNS Tunnel inbound + clients / DNS bundle. Inline guidance on which client app eats which share format (Amnezia VPN, v2rayN, v2rayNG, NekoBox, Hiddify, Streisand, Shadowrocket, FoXray, Telegram desktop / mobile, MasterDnsVPN client). |
+| **Share formats** | AmneziaWG: `.conf` file, QR, one-time link. Xray: `vless://` URL (with both `spx` and `spiderX` for max compat), QR, native Amnezia-format JSON. Telegram: `tg://proxy?…&secret=ee<…>` link (Fake-TLS) + `dd`-prefix and classic variants for the same user, QR. MasterDnsVPN: downloadable `client_config.toml` + `client_resolvers.txt`, JSON, `mdnsvpn://b64?<base64>` single-string blob (for `mdnsvpn -json_base64`), QR. |
 | **Auth** | Argon2id password hashing, server-side session cookies (`SameSite=Strict`, `HttpOnly`, `Secure` unless `INSECURE=true`). Per-username (10/min) **and** per-source-IP (50/min) login rate limit. Constant-time username-not-found path (no enumeration via timing). |
 | **2FA / TOTP** | Server-generated 20-byte secrets, RFC 6238 verification, separate 5/5min rate limit on TOTP code attempts. `setup` / `create` / `delete` API contract. |
 | **Setup wizard** | 4-step first-run flow. `INIT_ENABLED` env-var auto-setup for Kubernetes/CI deployments. |
-| **Per-client firewall** | Native nftables `wg-clients` chain inside the `inet awg-easy-rs` table. `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild via a single `nft -f -` transaction. (AmneziaWG side only; Xray and telemt multiplex through one socket each, so per-peer L3/L4 filtering doesn't compose with VLESS UUIDs / MTProxy secrets.) |
+| **Per-client firewall** | Native nftables `wg-clients` chain inside the `inet awg-easy-rs` table. `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild via a single `nft -f -` transaction. (AmneziaWG side only; Xray, telemt, and MasterDnsVPN multiplex through one socket each, so per-peer L3/L4 filtering doesn't compose with VLESS UUIDs / MTProxy secrets / DNS-tunnel envelopes.) |
 | **Metrics** | `/metrics/json` and `/metrics/prometheus`, gated by hashed Bearer token (when `metricsPassword` is set). Exposes per-peer rx/tx, last-handshake, online state. |
 | **Operational** | Background cron expires clients/one-time-links every 60 s. `/health` endpoint (always 200). Persistent SQLite (WAL mode, foreign keys on). Idempotent schema migrations. |
 
@@ -92,6 +94,7 @@ All configuration is via environment variables.
 | `XRAY_BIN_PATH` | — | If set, the supervisor uses this `xray` binary instead of extracting the bundled one. Useful for operators tracking upstream Xray independently of awg-easy-rs releases. |
 | `WG_EASY_MTPROXY_DIR` | `<WG_EASY_CONF_DIR>/mtproxy` | Where the bundled `telemt` ELF is extracted, plus the generated `config.toml`, telemt's PID file, and the `tlsfront` cache (real TLS records fetched from the masking domain). Persist on a docker volume to avoid re-extraction + tlsfront rebuilds across restarts. |
 | `WG_EASY_DNS_DIR` | `<WG_EASY_CONF_DIR>/dns` | Where the bundled DNS-stack ELFs (dnscrypt-proxy, tor, lyrebird, snowflake, webtunnel) are extracted, plus generated configs (`dnscrypt-proxy.toml`, `torrc`, etc.) and tor's data directory. Persist to keep tor's onion descriptors / consensus across restarts. |
+| `WG_EASY_MDNSVPN_DIR` | `<WG_EASY_CONF_DIR>/mdnsvpn` | Where the bundled MasterDnsVPN ELF is extracted, plus the generated `server_config.toml` and the singleton `encrypt_key.txt`. Persist on a docker volume to avoid re-extraction across restarts. |
 
 ### First-run auto-setup
 
@@ -179,6 +182,25 @@ Telemt's MTProto + Fake-TLS + middle-end pool integration is non-trivial and the
 
 ---
 
+## DNS-tunnel mode (MasterDnsVPN)
+
+MasterDnsVPN is **off by default** — and unlike the other transports it has a hard infrastructure prerequisite: you need to own a real domain and create an `NS` delegation pointing a tunnel subdomain at this server's public IP. There's no way to short-cut that. The upstream README walks through the DNS-record setup; once it's live:
+
+1. Open **Admin → DNS Tunnel (MasterDnsVPN) → Inbound** in the web UI.
+2. Click **Regenerate** to mint a fresh 16-byte shared encryption key. The same key is baked into every client's `client_config.toml` (MasterDnsVPN has no per-user secret slot — that's a property of the underlying protocol).
+3. Paste the NS-delegated FQDN(s) into **Tunnel domains** (one per line). Pick an encryption method (XOR for low CPU on weak hardware, AES-256-GCM otherwise) and a protocol type — `SOCKS5` lets clients pick the destination per-stream; `TCP` forwards every connection to a fixed `forwardIp:forwardPort` (useful for chaining mdnsvpn into a Shadowsocks / 3X-UI panel).
+4. Set the UDP listen port (default 53). On hosts where awg-easy-rs runs unprivileged, the binary needs `CAP_NET_BIND_SERVICE` or a port-forward (since :53 is privileged); on a `docker compose up -d` deployment the default `cap_add: NET_ADMIN` is already broad enough.
+5. Toggle **Enabled** and **Save** — mdnsvpn extracts on first start, writes `server_config.toml` + `encrypt_key.txt`, and binds the UDP listener.
+6. Switch to **DNS Tunnel → Clients**, click **Add client**, and hand over the auto-generated `client_config.toml` + `client_resolvers.txt` (or the single-string `mdnsvpn://b64?<base64>` blob — paste straight into `mdnsvpn -json_base64 <blob>` on the client side).
+
+Awg-easy-rs is the **bookkeeping source of truth** for the client roster — but MasterDnsVPN itself authenticates every tunnel with the singleton encryption key, so per-client rows are pure UX state (share-link slot, expiry, enabled toggle). Disabling a client in the admin UI revokes its config bundle from the download URLs but doesn't break the underlying tunnel for someone who already has a copy; rolling the encryption key (**Regenerate**) is what revokes every issued config.
+
+### Why bundle MasterDnsVPN?
+
+The custom protocol — packed encrypted fragments stuffed into DNS labels, ARQ-based reliability over a UDP-only transport, MTU discovery across heterogeneous resolvers — isn't trivial to reimplement, and the upstream Go binary is small (~2 MB compressed) and already statically linked. Embedding it + supervising via tokio matches the Xray and telemt pattern: "single binary" UX without forking the protocol. The trade-off is the same as the others — bundled version is pinned in `vendor/MDNSVPN_VERSION` and bumped via `vendor/update.sh mdnsvpn <ver>`.
+
+---
+
 ## TLS
 
 The binary ships **without** TLS termination — put a reverse proxy in front of it. Caddy is the easiest:
@@ -256,6 +278,7 @@ Versions are pinned in:
 
 - `vendor/XRAY_VERSION` (Xray-core)
 - `vendor/TELEMT_VERSION` (telemt MTProxy)
+- `vendor/MDNSVPN_VERSION` (MasterDnsVPN DNS-tunnel server)
 - `vendor/DNS_BUNDLE_VERSION` (dnscrypt-proxy + tor + lyrebird + snowflake + webtunnel)
 
 To bump, run `vendor/update.sh <binary> <version>`. The script downloads / builds, SHA-verifies, and rewrites the matching pin file. For example:
@@ -263,6 +286,7 @@ To bump, run `vendor/update.sh <binary> <version>`. The script downloads / build
 ```bash
 vendor/update.sh xray            v26.3.28
 vendor/update.sh telemt          3.4.12
+vendor/update.sh mdnsvpn         v2026.06.01.000000-abcdef0
 vendor/update.sh dnscrypt-proxy  2.1.16
 vendor/update.sh tor             0.4.9.9     # Alpine Docker build, ~10 min
 vendor/update.sh lyrebird        0.8.2       # Go static, ~2 min
@@ -274,13 +298,13 @@ Then commit the updated pin file (the `.gz` itself stays out of git). `build.rs`
 
 ### Running without Docker
 
-Gaming mode requires `awg`, `awg-quick`, and the AmneziaWG kernel module on the host. The other three subsystems are self-contained — the bundled `xray`, `telemt`, and DNS-stack ELFs are extracted to `WG_EASY_XRAY_DIR` / `WG_EASY_MTPROXY_DIR` / `WG_EASY_DNS_DIR` on first start and don't need anything else on the host. Only the firewall stage needs `nft` available.
+Gaming mode requires `awg`, `awg-quick`, and the AmneziaWG kernel module on the host. The other four subsystems are self-contained — the bundled `xray`, `telemt`, `mdnsvpn`, and DNS-stack ELFs are extracted to `WG_EASY_XRAY_DIR` / `WG_EASY_MTPROXY_DIR` / `WG_EASY_MDNSVPN_DIR` / `WG_EASY_DNS_DIR` on first start and don't need anything else on the host. Only the firewall stage needs `nft` available.
 
 ```bash
 sudo ./target/x86_64-unknown-linux-musl/release/awg-easy-rs
 ```
 
-`/etc/wireguard/` must be writable by the user the binary runs as. If `awg-quick up awg0` fails the binary still starts and exposes the web UI — fix the host config and click *Restart Interface* in the admin panel. Per-supervisor failures surface in their respective admin tabs (`Admin → Browsing → Inbound`, `Admin → Telegram → Inbound`, `Admin → DNS bundle`). All four are independently disable-able and degrade gracefully — a misconfigured Browsing inbound doesn't block AmneziaWG, etc.
+`/etc/wireguard/` must be writable by the user the binary runs as. If `awg-quick up awg0` fails the binary still starts and exposes the web UI — fix the host config and click *Restart Interface* in the admin panel. Per-supervisor failures surface in their respective admin tabs (`Admin → Browsing → Inbound`, `Admin → Telegram → Inbound`, `Admin → DNS Tunnel → Inbound`, `Admin → DNS bundle`). All five are independently disable-able and degrade gracefully — a misconfigured Browsing inbound doesn't block AmneziaWG, etc.
 
 ---
 
@@ -288,34 +312,35 @@ sudo ./target/x86_64-unknown-linux-musl/release/awg-easy-rs
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Single binary (~18 MB stripped, musl-static, distro-agnostic)│
+│ Single binary (~20 MB stripped, musl-static, distro-agnostic)│
 │                                                              │
 │  Axum 0.7 ──── HTTP server                                   │
 │  rusqlite ──── SQLite (WAL, FK on)                           │
 │  argon2 ────── password hashing                              │
 │  totp-rs ───── 2FA                                           │
-│  qrcode ────── SVG QR (vless:// + tg:// + AWG configs)       │
+│  qrcode ────── SVG QR (vless:// + tg:// + mdnsvpn:// + AWG)  │
 │  tokio-rustls ─ TLS 1.3 dest probe for Reality               │
 │                                                              │
 │  Static UI: index.html + app.js (embedded via include_str!)  │
 │  Bundled ELFs (include_bytes!(vendor/<name>-linux-amd64.gz)):│
-│    xray-core, telemt, dnscrypt-proxy, tor, lyrebird,         │
-│    snowflake, webtunnel — all extracted on first start,      │
-│    SHA-verified against the embedded constant.               │
-└─┬──────────┬──────────────────┬───────────────────┬──────────┘
-  │          │                  │                   │
-  │ Gaming   │ Browsing         │ Telegram          │ DNS bundle
-  │ argv-only│ tokio Child      │ tokio Child       │ tokio Child
-  ▼          ▼                  ▼                   ▼
-awg /      xray (SIGHUP       telemt (notify     dnscrypt-proxy
-awg-quick  reload, SIGTERM    hot-reload via     (+ optional tor
-/ nft      shutdown)          config.toml,      with PT plugin)
-  │          │                 SIGTERM grace)        │
-  ▼          ▼                  │                    ▼
-AWG       VLESS+Reality+        ▼                DoH / DNSCrypt
-kernel    Vision listener   MTProto listener     egress, opt. via
-module    on TCP/443        on TCP/8080          tor SOCKS :9053
-                            (Fake-TLS, ee-prefix)
+│    xray-core, telemt, MasterDnsVPN, dnscrypt-proxy, tor,     │
+│    lyrebird, snowflake, webtunnel — all extracted on first   │
+│    start, SHA-verified against the embedded constant.        │
+└─┬─────────┬──────────────┬─────────────┬─────────────────────┘
+  │         │              │             │            │
+  │ Gaming  │ Browsing     │ Telegram    │ DNS-tunnel │ DNS bundle
+  │ argv    │ tokio Child  │ tokio Child │ tokio Child│ tokio Child
+  ▼         ▼              ▼             ▼            ▼
+awg /     xray (SIGHUP   telemt        MasterDnsVPN  dnscrypt-proxy
+awg-quick reload, ...)   (notify       (rewrite +    (+ optional tor
+/ nft     │              hot-reload    restart on    with PT plugin)
+  │       ▼              of config)    config change)    │
+  ▼      VLESS+Reality+    │              │              ▼
+AWG      Vision listener   ▼              ▼          DoH / DNSCrypt
+kernel   on TCP/443      MTProto      DNS-tunnel     egress, opt. via
+module                   listener     listener       tor SOCKS :9053
+                         on TCP/8080  on UDP/53
+                         (Fake-TLS)   (NS-delegated)
 
   Firewall: single `inet awg-easy-rs` nftables table.
   PostUp creates: forward / nat-postrouting / filter-input.
@@ -329,11 +354,13 @@ module    on TCP/443        on TCP/8080          tor SOCKS :9053
 ```
 src/
   main.rs          # entrypoint, env→config, INIT_ENABLED auto-setup,
-                   # AWG + Xray + DNS bundle + telemt supervisor startup
+                   # AWG + Xray + DNS bundle + telemt + MasterDnsVPN
+                   # supervisor startup
   config.rs        # env-var Config (LazyLock)
   db.rs            # rusqlite + schema + idempotent migrations
                    # (interfaces, clients, xray_inbound, xray_clients,
-                   #  dns_bundle, mtproxy_inbound, mtproxy_users, …)
+                   #  dns_bundle, mtproxy_inbound, mtproxy_users,
+                   #  mdnsvpn_inbound, mdnsvpn_clients, …)
   auth.rs          # Argon2id wrappers, SHA-256, session-token gen
   qr.rs            # SVG QR codes
   firewall.rs      # native nftables; manages inet awg-easy-rs table:
@@ -360,6 +387,15 @@ src/
     client.rs      # minimal HTTP/1.1 client for 127.0.0.1:9091/v1/*
     supervisor.rs  # spawn telemt, reconcile users on every start
     mod.rs
+  mdnsvpn/         # — DNS-tunnel mode (MasterDnsVPN) —
+    runtime.rs     # include_bytes! the gzipped ELF, decompress to disk
+    keys.rs        # 16-byte hex shared-key generator + validator
+    config.rs      # server_config.toml generator (singleton inbound)
+    share.rs       # per-client client_config.toml + resolvers.txt +
+                   # JSON + mdnsvpn://b64?<base64> share blob
+    supervisor.rs  # tokio Child; rewrite-and-restart on config change
+                   # (no upstream SIGHUP)
+    mod.rs
   dns/             # — Bundled DNS stack (dnscrypt-proxy + tor + PTs) —
     runtime.rs     # extract bundled ELFs (5 binaries, all optional)
     dnscrypt.rs    # dnscrypt-proxy.toml generator
@@ -373,6 +409,8 @@ src/
     admin.rs       # /api/admin/* (admin role required)
     xray.rs        # /api/admin/xray/* + /api/xray/clients/*
     mtproxy.rs     # /api/admin/mtproxy/* (inbound, users, stats, QR)
+    mdnsvpn.rs     # /api/admin/mdnsvpn/* + /api/mdnsvpn/clients/*
+                   # (inbound, key regen, per-client config downloads)
     dns.rs         # /api/admin/dns/* (bundle config, status, restart)
     setup.rs       # /api/setup/* wizard + v3 backup migrate
     routes.rs      # /api/information, /metrics/*, /cnf/:token
@@ -383,6 +421,7 @@ static/
 vendor/
   XRAY_VERSION          # pinned Xray-core version + uncompressed-ELF SHA-256
   TELEMT_VERSION        # pinned telemt version + SHA
+  MDNSVPN_VERSION       # pinned MasterDnsVPN version + SHA
   DNS_BUNDLE_VERSION    # pinned dnscrypt-proxy / tor / PTs versions + SHAs
   LICENSES/             # preserved upstream LICENSE files (legal attribution)
   update.sh             # curation tool — bumps a binary to a new version
@@ -427,23 +466,24 @@ If you find a security issue, please open an issue marked `security`.
 
 | | Upstream Node.js | awg-easy-rs |
 |---|---|---|
-| Container size | ~150 MB (Node + deps) | ~50 MB (Alpine + Rust binary with bundled Xray + telemt + AmneziaWG tools; +~20 MB if the DNS bundle is curated) |
+| Container size | ~150 MB (Node + deps) | ~50 MB (Alpine + Rust binary with bundled Xray + telemt + MasterDnsVPN + AmneziaWG tools; +~20 MB if the DNS bundle is curated) |
 | Cold start | seconds (Nuxt warm-up) | ~50 ms |
-| RAM (idle) | 80-120 MB | 8-15 MB (each idle subprocess adds ~5 MB; budget for AWG only, AWG+Xray, AWG+Xray+telemt, etc.) |
+| RAM (idle) | 80-120 MB | 8-15 MB (each idle subprocess adds ~5 MB; budget for AWG only, AWG+Xray, AWG+Xray+telemt+mdnsvpn, etc.) |
 | Distribution | docker image only | musl-static binary, runs unchanged on glibc / musl / any other libc x86_64 host |
 | AmneziaWG params | Jc/Jmin/Jmax, S1-S4, H1-H4, I1-I5 | Same + per-peer AdvancedSecurity (kernel parity) + per-peer & UserConfig `additional_config` escape hatch |
 | Xray VLESS+Reality+Vision | **no** | **yes** (bundled v26.3.27, supervised subprocess, per-peer UUIDs + shortIds, TLS dest probe) |
 | Telegram MTProxy | **no** | **yes** (bundled telemt 3.4.11 — Fake-TLS / SNI fronting, per-user secrets, runtime HTTP control plane) |
+| MasterDnsVPN DNS-tunnel | **no** | **yes** (bundled v2026.05.10 — encrypted TCP over DNS, NS-delegated subdomain, SOCKS5 / fixed-TCP forwarding) |
 | Bundled DNS stack | **no** | **yes** (optional dnscrypt-proxy + tor + lyrebird/snowflake/webtunnel; off by default; tor opt-in independently) |
 | DNS-leak prevention | client-side `DNS = …` only | nftables `dns-prerouting` DNAT + optional residual-drop chain — server-enforced regardless of client config |
 | TOTP secret | server-generated | server-generated |
 | CSP | `'unsafe-inline'` | `'unsafe-inline'` (inline event handlers) |
 | Schema | Drizzle migrations | hand-rolled `CREATE TABLE IF NOT EXISTS` + idempotent `ALTER TABLE` |
-| Plain WireGuard fallback | yes (`EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG`) | **no** — pure AmneziaWG (Gaming) + Xray Reality (Browsing) + telemt (Telegram) only |
+| Plain WireGuard fallback | yes (`EXPERIMENTAL_AWG`/`OVERRIDE_AUTO_AWG`) | **no** — pure AmneziaWG (Gaming) + Xray Reality (Browsing) + telemt (Telegram) + MasterDnsVPN (DNS-tunnel) only |
 | Reproducible build | n/a | vendored binaries are CI artifacts produced from `vendor/*_VERSION` pins; `scripts/build.sh` does the same locally |
-| Tests | vitest unit suite | 144 unit + integration tests across DB, API, security, AmneziaWG params, Xray config & supervisor, MTProxy config + envelope parsing, plus `--ignored` e2e tests that spawn real subprocesses |
+| Tests | vitest unit suite | 400+ unit + integration tests across DB, API, security, AmneziaWG params, Xray config & supervisor, MTProxy + MasterDnsVPN config + envelope parsing, plus `--ignored` e2e tests that spawn real subprocesses |
 
-If you need plain-WireGuard support, stay on upstream `awg-easy`. If you want any combination of AmneziaWG + Xray Reality + Telegram MTProxy in one self-supervising binary — with optional bundled DNS-leak prevention — this is the only option.
+If you need plain-WireGuard support, stay on upstream `awg-easy`. If you want any combination of AmneziaWG + Xray Reality + Telegram MTProxy + MasterDnsVPN DNS-tunnel in one self-supervising binary — with optional bundled DNS-leak prevention — this is the only option.
 
 ---
 

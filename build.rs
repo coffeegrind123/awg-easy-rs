@@ -1,18 +1,23 @@
 //! Build-time embedding of the vendored ELFs for the target architecture.
 //!
-//! Three independent bundles, each gated by its own `cfg`:
+//! Four independent bundles, each gated by its own `cfg`:
 //!
-//! - `xray_bundled`   — Xray-core (single ELF, ~13 MB compressed) for the
+//! - `xray_bundled`    — Xray-core (single ELF, ~13 MB compressed) for the
 //!   Browsing-mode VLESS+Reality+Vision flow. Pinned in
 //!   `vendor/XRAY_VERSION`.
-//! - `dns_bundled`    — DNS stack: dnscrypt-proxy, tor, lyrebird,
+//! - `dns_bundled`     — DNS stack: dnscrypt-proxy, tor, lyrebird,
 //!   snowflake, webtunnel. Five ELFs per architecture. Pinned in
 //!   `vendor/DNS_BUNDLE_VERSION`. The bundle is all-or-nothing per
 //!   target arch — partial bundles are intentionally rejected so
 //!   runtime supervisor code can rely on every component being present.
-//! - `telemt_bundled` — telemt (single ELF, ~6 MB compressed) — Rust +
+//! - `telemt_bundled`  — telemt (single ELF, ~6 MB compressed) — Rust +
 //!   Tokio MTProxy server for Telegram (Fake-TLS / SNI fronting, per-user
 //!   secrets via runtime HTTP API). Pinned in `vendor/TELEMT_VERSION`.
+//! - `mdnsvpn_bundled` — MasterDnsVPN (Go) server (single ELF, ~2 MB
+//!   compressed). DNS-tunnel VPN server: clients pack TCP/SOCKS5 traffic
+//!   into DNS queries through public resolvers, server listens on UDP/53
+//!   for the tunnel envelopes and re-emits the inner TCP through a real
+//!   socks5/forwarder. Pinned in `vendor/MDNSVPN_VERSION`.
 //!
 //! All three bundles surface their version + per-binary SHA-256 to the
 //! rest of the crate via `cargo:rustc-env=AWG_EASY_*` constants so the
@@ -57,6 +62,7 @@ fn main() {
     process_xray_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
     process_dns_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
     process_telemt_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
+    process_mdnsvpn_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +326,68 @@ fn process_telemt_bundle(
     println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
     println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256={expected_sha}");
     println!("cargo:rustc-cfg=telemt_bundled");
+}
+
+// ---------------------------------------------------------------------------
+// MasterDnsVPN bundle (DNS-tunnel VPN — server side)
+// ---------------------------------------------------------------------------
+
+fn process_mdnsvpn_bundle(
+    target_os: &str,
+    target_arch: &str,
+    out_dir: &Path,
+    manifest_dir: &Path,
+) {
+    println!("cargo:rerun-if-changed=vendor/MDNSVPN_VERSION");
+    println!("cargo:rerun-if-changed=vendor/mdnsvpn-linux-amd64.gz");
+    println!("cargo:rustc-check-cfg=cfg(mdnsvpn_bundled)");
+
+    let version_path = manifest_dir.join("vendor/MDNSVPN_VERSION");
+    let version_text = fs::read_to_string(&version_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", version_path.display()));
+    let kv = parse_kv(&version_text);
+    let mdnsvpn_version = kv
+        .get("MDNSVPN_VERSION")
+        .expect("MDNSVPN_VERSION not set in vendor/MDNSVPN_VERSION");
+
+    // Same arch story as the rest of the vendor tree: x86_64-linux only.
+    let bundle = match (target_os, target_arch) {
+        ("linux", "x86_64") => Some(("mdnsvpn-linux-amd64.gz", "MDNSVPN_AMD64_SHA256")),
+        _ => None,
+    };
+
+    let Some((blob_name, sha_key)) = bundle else {
+        println!("cargo:rustc-env=AWG_EASY_MDNSVPN_VERSION={mdnsvpn_version}");
+        println!("cargo:rustc-env=AWG_EASY_MDNSVPN_SHA256=");
+        println!(
+            "cargo:warning=MasterDnsVPN bundled mode is not available for target {target_os}-{target_arch}; \
+             awg-easy-rs will build without DNS-tunnel support."
+        );
+        return;
+    };
+
+    let blob_src = manifest_dir.join("vendor").join(blob_name);
+    let expected_sha = kv.get(sha_key).map(String::as_str).unwrap_or("");
+
+    if !blob_src.is_file() || expected_sha.is_empty() {
+        println!("cargo:rustc-env=AWG_EASY_MDNSVPN_VERSION={mdnsvpn_version}");
+        println!("cargo:rustc-env=AWG_EASY_MDNSVPN_SHA256=");
+        println!(
+            "cargo:warning=MasterDnsVPN blob missing ({}) — building without mdnsvpn_bundled. \
+             Run scripts/build.sh to materialise it from the pinned version.",
+            blob_src.display()
+        );
+        return;
+    }
+
+    let blob_dst = out_dir.join("mdnsvpn.gz");
+    fs::copy(&blob_src, &blob_dst).unwrap_or_else(|e| {
+        panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display())
+    });
+
+    println!("cargo:rustc-env=AWG_EASY_MDNSVPN_VERSION={mdnsvpn_version}");
+    println!("cargo:rustc-env=AWG_EASY_MDNSVPN_SHA256={expected_sha}");
+    println!("cargo:rustc-cfg=mdnsvpn_bundled");
 }
 
 // ---------------------------------------------------------------------------

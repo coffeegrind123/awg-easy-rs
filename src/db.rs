@@ -380,6 +380,135 @@ pub struct MtproxyUser {
     pub updated_at: String,
 }
 
+/// Singleton "MasterDnsVPN" inbound — one mdnsvpn server per host.
+/// Modelled as a single row keyed on `id = 'mdnsvpn0'`, mirroring the
+/// `xray0` / `mtproxy0` pattern.
+///
+/// MasterDnsVPN is a DNS-tunnel VPN (the upstream Go binary): the server
+/// listens on a UDP port (default :53) and parses incoming DNS queries
+/// whose QNAME matches one of the configured tunnel domains. It then
+/// extracts encrypted TCP fragments out of the labels, reassembles the
+/// stream, and forwards via either an internal SOCKS5 dispatcher
+/// (`PROTOCOL_TYPE = "SOCKS5"`) or a fixed `FORWARD_IP:FORWARD_PORT`
+/// target (`PROTOCOL_TYPE = "TCP"`). Operator owns a real domain and an
+/// `NS` delegation that points the tunnel subdomain at this server's
+/// public IP — there is no way to short-cut that requirement.
+///
+/// All clients share the same pre-shared encryption key (stored here as
+/// `encryption_key` in lowercase hex). Per-user records in
+/// `mdnsvpn_clients_table` are bookkeeping for the share-link UX —
+/// MasterDnsVPN itself doesn't have a per-user secret model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MdnsvpnInbound {
+    pub id: String,
+    /// JSON array of tunnel domains (matches MasterDnsVPN's `DOMAIN = […]`).
+    /// Each entry must be the full FQDN that the operator NS-delegated to
+    /// this server. e.g. `["v.example.com"]`.
+    pub domains: String,
+    /// UDP port the mdnsvpn server binds. Default 53. Operators behind a
+    /// load balancer can move it but most clients pick public resolvers
+    /// that talk to the authoritative on :53, so changing this is unusual.
+    pub port: i64,
+    /// Bind address — almost always `0.0.0.0`. Stored separately so an
+    /// operator who wants to bind a specific interface can do it without
+    /// editing `additional_config`.
+    pub bind: String,
+    /// MasterDnsVPN encryption method:
+    ///   0 = None, 1 = XOR, 2 = ChaCha20,
+    ///   3 = AES-128-GCM, 4 = AES-192-GCM, 5 = AES-256-GCM.
+    /// Must match every client's `DATA_ENCRYPTION_METHOD`. Default 1
+    /// (XOR) — matches the upstream sample. Operators handling sensitive
+    /// traffic should bump to 5.
+    pub encryption_method: i64,
+    /// Pre-shared encryption key (lowercase hex). The same value is
+    /// written into both `encrypt_key.txt` (read by mdnsvpn server) and
+    /// every generated `client_config.toml`. Empty until first
+    /// `regenerate-key` admin call.
+    pub encryption_key: String,
+    /// "SOCKS5" — clients pick the destination per-stream (acts as a
+    /// generic egress proxy).
+    /// "TCP"    — every client connection forwards to a fixed
+    ///            `FORWARD_IP:FORWARD_PORT`. Used for chaining: terminate
+    ///            mdnsvpn on this host, hand off to a Shadowsocks /
+    ///            other proxy on the next hop.
+    pub protocol_type: String,
+    /// JSON array of upstream resolvers used to satisfy DNS queries the
+    /// client tunnels via `DNS_QUERY_REQ`. Default `["1.1.1.1:53","1.0.0.1:53"]`.
+    pub dns_upstream_servers: String,
+    /// Used only when `protocol_type = "TCP"`, OR
+    /// `protocol_type = "SOCKS5"` AND `use_external_socks5 = true`.
+    /// Empty otherwise.
+    pub forward_ip: String,
+    /// Same usage as `forward_ip`. `0` is the unused-default sentinel.
+    pub forward_port: i64,
+    /// In SOCKS5 mode, when true the server doesn't connect to the final
+    /// destination directly — it chains through another SOCKS5 proxy at
+    /// `forward_ip:forward_port`. Useful for upstreaming mdnsvpn to a
+    /// Shadowsocks / 3X-UI panel as the README describes.
+    pub use_external_socks5: bool,
+    /// Username/password for the upstream SOCKS5 proxy (when
+    /// `use_external_socks5 = true` and the upstream requires it).
+    pub socks5_auth: bool,
+    pub socks5_user: String,
+    pub socks5_pass: String,
+    /// Free-form TOML appended verbatim to the generated
+    /// `server_config.toml`. Mirrors `XrayInbound::additional_config` —
+    /// escape hatch for keys the UI doesn't model (extra ARQ tunables,
+    /// custom MTU bounds, log paths, etc.).
+    pub additional_config: String,
+    /// When false the supervisor refuses to spawn. Disabled by default —
+    /// operator opts in after generating a key, picking a domain, and
+    /// confirming the NS delegation is live.
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One MasterDnsVPN client (peer). Bookkeeping for the share-link UX —
+/// awg-easy-rs maintains the per-client roster so the admin UI can show
+/// "expires", "enabled", and stable download URLs even though MasterDnsVPN
+/// itself has no per-user concept (every client uses the singleton
+/// `encryption_key`).
+///
+/// Per-client knobs that *do* differ from the inbound default land in
+/// columns of their own (resolvers, listen port, encryption-method
+/// override). Anything else lives in `additional_config_toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MdnsvpnClient {
+    pub id: i64,
+    pub user_id: Option<i64>,
+    pub inbound_id: String,
+    pub name: String,
+    /// Per-client public DNS resolver list as JSON array of strings.
+    /// Matches the format of `client_resolvers.txt` (one resolver per
+    /// line, but expressed here as JSON for stable storage).
+    /// Each entry is one of:
+    ///   "8.8.8.8"
+    ///   "1.1.1.1:5353"
+    ///   "192.168.1.0/30"
+    ///   "[2001:4860:4860::8888]:53"
+    /// Empty string means "let the operator's default resolver list be
+    /// used at config-generation time."
+    pub resolvers: String,
+    /// Local SOCKS5 listen port the client opens for the user's apps.
+    /// Default 18000 — matches MasterDnsVPN's sample. Operators can hand
+    /// out different ports per client to make app-side configuration
+    /// easier when many users share the same machine.
+    pub listen_port: i64,
+    /// Local SOCKS5 username for the client-side proxy auth. Empty
+    /// disables auth (the share config sets `SOCKS5_AUTH = false`).
+    pub socks5_user: String,
+    /// Local SOCKS5 password.
+    pub socks5_pass: String,
+    pub expires_at: Option<String>,
+    /// Per-client TOML appended to the generated `client_config.toml`.
+    /// Same escape-hatch model as MtproxyInbound::additional_config.
+    pub additional_config_toml: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One Xray (VLESS) peer. The `inbound_id` FK supports multi-inbound
 /// later; v1 always points at `'xray0'`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,6 +571,23 @@ pub struct CreateClientParams {
     pub dns: Option<String>,
     pub server_endpoint: Option<String>,
     pub advanced_security: Option<bool>,
+    pub enabled: bool,
+}
+
+/// Data required to insert a new MasterDnsVPN client. The handlers
+/// generate sensible defaults for `resolvers` / `listen_port` / etc.
+/// when omitted by the caller.
+#[derive(Debug, Clone)]
+pub struct CreateMdnsvpnClientParams {
+    pub user_id: Option<i64>,
+    pub inbound_id: String,
+    pub name: String,
+    pub resolvers: String,
+    pub listen_port: i64,
+    pub socks5_user: String,
+    pub socks5_pass: String,
+    pub expires_at: Option<String>,
+    pub additional_config_toml: Option<String>,
     pub enabled: bool,
 }
 
@@ -770,6 +916,51 @@ impl MtproxyInbound {
     }
 }
 
+impl MdnsvpnInbound {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(MdnsvpnInbound {
+            id: row.get("id")?,
+            domains: row.get("domains")?,
+            port: row.get("port")?,
+            bind: row.get("bind")?,
+            encryption_method: row.get("encryption_method")?,
+            encryption_key: row.get("encryption_key")?,
+            protocol_type: row.get("protocol_type")?,
+            dns_upstream_servers: row.get("dns_upstream_servers")?,
+            forward_ip: row.get("forward_ip")?,
+            forward_port: row.get("forward_port")?,
+            use_external_socks5: int_to_bool(row.get::<_, i64>("use_external_socks5")?),
+            socks5_auth: int_to_bool(row.get::<_, i64>("socks5_auth")?),
+            socks5_user: row.get("socks5_user")?,
+            socks5_pass: row.get("socks5_pass")?,
+            additional_config: row.get("additional_config")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl MdnsvpnClient {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(MdnsvpnClient {
+            id: row.get("id")?,
+            user_id: row.get("user_id")?,
+            inbound_id: row.get("inbound_id")?,
+            name: row.get("name")?,
+            resolvers: row.get("resolvers")?,
+            listen_port: row.get("listen_port")?,
+            socks5_user: row.get("socks5_user")?,
+            socks5_pass: row.get("socks5_pass")?,
+            expires_at: row.get::<_, Option<String>>("expires_at")?,
+            additional_config_toml: row.get::<_, Option<String>>("additional_config_toml")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
 impl MtproxyUser {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         Ok(MtproxyUser {
@@ -1064,6 +1255,60 @@ CREATE TABLE IF NOT EXISTS mtproxy_users_table (
     FOREIGN KEY (inbound_id) REFERENCES mtproxy_inbound_table(id)
 )"#;
 
+// mdnsvpn_inbound_table — singleton MasterDnsVPN server config. Defaults
+// match the upstream sample (XOR encryption on, SOCKS5 mode, UDP/53,
+// 1.1.1.1 upstreams). `enabled=0` keeps the supervisor from spawning
+// until the operator explicitly opts in (a generated key + a real
+// NS-delegated domain are both required).
+const CREATE_MDNSVPN_INBOUND: &str = r#"
+CREATE TABLE IF NOT EXISTS mdnsvpn_inbound_table (
+    id                      TEXT PRIMARY KEY,
+    domains                 TEXT NOT NULL DEFAULT '[]',
+    port                    INTEGER NOT NULL DEFAULT 53,
+    bind                    TEXT NOT NULL DEFAULT '0.0.0.0',
+    encryption_method       INTEGER NOT NULL DEFAULT 1,
+    encryption_key          TEXT NOT NULL DEFAULT '',
+    protocol_type           TEXT NOT NULL DEFAULT 'SOCKS5',
+    dns_upstream_servers    TEXT NOT NULL DEFAULT '["1.1.1.1:53","1.0.0.1:53"]',
+    forward_ip              TEXT NOT NULL DEFAULT '',
+    forward_port            INTEGER NOT NULL DEFAULT 0,
+    use_external_socks5     INTEGER NOT NULL DEFAULT 0,
+    socks5_auth             INTEGER NOT NULL DEFAULT 0,
+    socks5_user             TEXT NOT NULL DEFAULT '',
+    socks5_pass             TEXT NOT NULL DEFAULT '',
+    additional_config       TEXT NOT NULL DEFAULT '',
+    enabled                 INTEGER NOT NULL DEFAULT 0,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+)"#;
+
+// mdnsvpn_clients_table — per-client bookkeeping. MasterDnsVPN itself
+// has no per-user secret; every client shares the singleton
+// `encryption_key` on the inbound. This table exists so the admin UI
+// can hand out stable per-user share-URL slots, expire individual
+// configs, and toggle them on/off without affecting the rest.
+//
+// UNIQUE(name) means two clients can't have the same display name —
+// keeps the per-name download URLs unambiguous.
+const CREATE_MDNSVPN_CLIENTS: &str = r#"
+CREATE TABLE IF NOT EXISTS mdnsvpn_clients_table (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                 INTEGER,
+    inbound_id              TEXT NOT NULL DEFAULT 'mdnsvpn0',
+    name                    TEXT NOT NULL UNIQUE,
+    resolvers               TEXT NOT NULL DEFAULT '',
+    listen_port             INTEGER NOT NULL DEFAULT 18000,
+    socks5_user             TEXT NOT NULL DEFAULT '',
+    socks5_pass             TEXT NOT NULL DEFAULT '',
+    expires_at              TEXT,
+    additional_config_toml  TEXT,
+    enabled                 INTEGER NOT NULL DEFAULT 1,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id)    REFERENCES users_table(id),
+    FOREIGN KEY (inbound_id) REFERENCES mdnsvpn_inbound_table(id)
+)"#;
+
 // ---------------------------------------------------------------------------
 // Hook templates
 // ---------------------------------------------------------------------------
@@ -1117,6 +1362,8 @@ fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(CREATE_XRAY_CLIENTS)?;
     conn.execute_batch(CREATE_MTPROXY_INBOUND)?;
     conn.execute_batch(CREATE_MTPROXY_USERS)?;
+    conn.execute_batch(CREATE_MDNSVPN_INBOUND)?;
+    conn.execute_batch(CREATE_MDNSVPN_CLIENTS)?;
     apply_migrations(conn)?;
     Ok(())
 }
@@ -1255,6 +1502,14 @@ fn ensure_singleton_rows(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO mtproxy_inbound_table (id) VALUES (?1)",
         params!["mtproxy0"],
     )?;
+    // mdnsvpn_inbound: every field defaults to its column-level default
+    // in CREATE_MDNSVPN_INBOUND — encryption method 1 (XOR), no key
+    // until the operator regenerates one, no domains until the operator
+    // sets the NS-delegated FQDN. `enabled = 0`.
+    conn.execute(
+        "INSERT OR IGNORE INTO mdnsvpn_inbound_table (id) VALUES (?1)",
+        params!["mdnsvpn0"],
+    )?;
     Ok(())
 }
 
@@ -1359,6 +1614,15 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO mtproxy_inbound_table (id) VALUES (?1)",
         params!["mtproxy0"],
+    )?;
+
+    // mdnsvpn_inbound default — disabled until the operator generates a
+    // key, sets a NS-delegated domain, and flips the toggle. Column-
+    // level defaults supply port 53, SOCKS5 mode, XOR encryption, and
+    // the 1.1.1.1 / 1.0.0.1 upstreams (matching the upstream sample).
+    conn.execute(
+        "INSERT OR IGNORE INTO mdnsvpn_inbound_table (id) VALUES (?1)",
+        params!["mdnsvpn0"],
     )?;
 
     tracing::info!("Seeded default database rows");
@@ -2248,5 +2512,152 @@ pub fn delete_mtproxy_user(username: &str) -> Result<()> {
     if n == 0 {
         return Err(anyhow!("MTProxy user {username:?} not found"));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MasterDnsVPN inbound + clients helpers
+// ---------------------------------------------------------------------------
+
+pub fn get_mdnsvpn_inbound() -> Result<MdnsvpnInbound> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM mdnsvpn_inbound_table WHERE id = 'mdnsvpn0'",
+        [],
+        |row| MdnsvpnInbound::from_row(row),
+    )
+    .context("No mdnsvpn_inbound row found")
+}
+
+const VALID_MDNSVPN_INBOUND_COLUMNS: &[&str] = &[
+    "domains",
+    "port",
+    "bind",
+    "encryption_method",
+    "encryption_key",
+    "protocol_type",
+    "dns_upstream_servers",
+    "forward_ip",
+    "forward_port",
+    "use_external_socks5",
+    "socks5_auth",
+    "socks5_user",
+    "socks5_pass",
+    "additional_config",
+    "enabled",
+];
+
+pub fn update_mdnsvpn_inbound(fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "mdnsvpn_inbound_table",
+        "id",
+        WhereVal::Str("mdnsvpn0"),
+        fields,
+        VALID_MDNSVPN_INBOUND_COLUMNS,
+        &["id"],
+    )
+}
+
+/// Replace just the encryption key. Pulled out so the regenerate-key
+/// admin endpoint can issue a single-column UPDATE without smuggling
+/// the rest of the inbound's state into an UpdateMap.
+pub fn update_mdnsvpn_encryption_key(key: &str) -> Result<()> {
+    let c = conn();
+    c.execute(
+        "UPDATE mdnsvpn_inbound_table \
+         SET encryption_key = ?1, updated_at = datetime('now') \
+         WHERE id = 'mdnsvpn0'",
+        params![key],
+    )?;
+    Ok(())
+}
+
+pub fn list_mdnsvpn_clients() -> Result<Vec<MdnsvpnClient>> {
+    let c = conn();
+    let mut stmt = c.prepare(
+        "SELECT * FROM mdnsvpn_clients_table ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| MdnsvpnClient::from_row(row))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_mdnsvpn_client(id: i64) -> Result<MdnsvpnClient> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM mdnsvpn_clients_table WHERE id = ?1",
+        params![id],
+        |row| MdnsvpnClient::from_row(row),
+    )
+    .context(format!("MasterDnsVPN client #{id} not found"))
+}
+
+pub fn create_mdnsvpn_client(data: &CreateMdnsvpnClientParams) -> Result<i64> {
+    let c = conn();
+    c.execute(
+        "INSERT INTO mdnsvpn_clients_table \
+         (user_id, inbound_id, name, resolvers, listen_port, \
+          socks5_user, socks5_pass, expires_at, additional_config_toml, enabled) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            data.user_id,
+            data.inbound_id,
+            data.name,
+            data.resolvers,
+            data.listen_port,
+            data.socks5_user,
+            data.socks5_pass,
+            data.expires_at,
+            data.additional_config_toml,
+            bool_to_int(data.enabled),
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+const VALID_MDNSVPN_CLIENT_COLUMNS: &[&str] = &[
+    "user_id",
+    "inbound_id",
+    "name",
+    "resolvers",
+    "listen_port",
+    "socks5_user",
+    "socks5_pass",
+    "expires_at",
+    "additional_config_toml",
+    "enabled",
+];
+
+pub fn update_mdnsvpn_client(id: i64, fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "mdnsvpn_clients_table",
+        "id",
+        WhereVal::I64(id),
+        fields,
+        VALID_MDNSVPN_CLIENT_COLUMNS,
+        &["id"],
+    )
+}
+
+pub fn delete_mdnsvpn_client(id: i64) -> Result<()> {
+    let c = conn();
+    let n = c.execute(
+        "DELETE FROM mdnsvpn_clients_table WHERE id = ?1",
+        params![id],
+    )?;
+    if n == 0 {
+        return Err(anyhow!("MasterDnsVPN client #{id} not found"));
+    }
+    Ok(())
+}
+
+pub fn toggle_mdnsvpn_client(id: i64, enabled: bool) -> Result<()> {
+    let c = conn();
+    c.execute(
+        "UPDATE mdnsvpn_clients_table \
+         SET enabled = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![bool_to_int(enabled), id],
+    )?;
     Ok(())
 }

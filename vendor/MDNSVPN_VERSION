@@ -1,0 +1,22 @@
+# Pinned MasterDnsVPN (Go server) version embedded in the awg-easy-rs binary.
+# build.rs reads this file to validate that the vendored blob matches the
+# expected version, and prints the version into the binary at compile time.
+#
+# x86_64 only — same target story as the rest of the vendor tree
+# (see vendor/README.md for the rationale).
+#
+# Upstream: https://github.com/masterking32/MasterDnsVPN
+# Release asset: MasterDnsVPN_Server_Linux_AMD64.tar.gz
+
+MDNSVPN_VERSION=v2026.05.10.180256-27c7e11
+
+# SHA-256 of the *stripped* MasterDnsVPN server ELF. The runtime extractor
+# uses this to skip re-extraction when the on-disk file already matches.
+# (Distinct from the upstream tarball SHA `3c6233ec…` recorded in vendor/README.md
+# under the MDNSVPN provenance section.)
+#
+# Source: stripped output of the Go ELF inside MasterDnsVPN_Server_Linux_AMD64.tar.gz.
+# vendor/update.sh strips debug info before gzipping to keep the bundled blob
+# under ~2 MB instead of the 6.6 MB unstripped form.
+
+MDNSVPN_AMD64_SHA256=c596b64374155a61689c5739b7c77fcf918ff7f6cb588016ac2912eba2f8fd80

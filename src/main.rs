@@ -79,6 +79,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("MTProxy supervisor startup failed (non-fatal): {e}");
     }
 
+    // Bring MasterDnsVPN (DNS-tunnel mode) online if it's been enabled.
+    // Disabled by default — the supervisor declines to start until the
+    // operator generates an encryption key, sets at least one
+    // NS-delegated domain, and flips the toggle. Failures are non-fatal
+    // (matches the Xray / telemt / DNS-bundle posture).
+    #[cfg(mdnsvpn_bundled)]
+    if let Err(e) = awg_easy_rs::mdnsvpn::supervisor::ensure_running().await {
+        tracing::warn!("MasterDnsVPN supervisor startup failed (non-fatal): {e}");
+    }
+
     // Start background cron job (every 60 seconds)
     tokio::spawn(async move {
         loop {
@@ -155,6 +165,8 @@ async fn main() -> anyhow::Result<()> {
     awg_easy_rs::dns::supervisor::shutdown_for_exit().await;
     #[cfg(telemt_bundled)]
     awg_easy_rs::mtproxy::supervisor::shutdown_for_exit().await;
+    #[cfg(mdnsvpn_bundled)]
+    awg_easy_rs::mdnsvpn::supervisor::shutdown_for_exit().await;
 
     if let Ok(iface) = db::get_interface() {
         firewall::remove_legacy_compat(

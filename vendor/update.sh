@@ -48,6 +48,7 @@ REPO_ROOT="$(cd "$VENDOR_DIR/.." && pwd)"
 XRAY_PIN="$VENDOR_DIR/XRAY_VERSION"
 DNS_PIN="$VENDOR_DIR/DNS_BUNDLE_VERSION"
 TELEMT_PIN="$VENDOR_DIR/TELEMT_VERSION"
+MDNSVPN_PIN="$VENDOR_DIR/MDNSVPN_VERSION"
 
 # Working directory for downloads + builds. Cleared on exit.
 WORK_DIR=""
@@ -96,6 +97,8 @@ Binaries:
   webtunnel       Built from Go source (CGO_ENABLED=0, fully static)
   telemt          Pre-built upstream release (GitHub, x86_64-linux-musl,
                   .sha256 companion verified)
+  mdnsvpn         Pre-built upstream release (GitHub, Linux_AMD64.tar.gz,
+                  SHA256SUMS.txt verified; stripped before gzip)
 
 Examples:
   vendor/update.sh xray            v26.3.28
@@ -105,6 +108,7 @@ Examples:
   vendor/update.sh snowflake       v2.13.2
   vendor/update.sh webtunnel       v0.0.5
   vendor/update.sh telemt          3.4.12
+  vendor/update.sh mdnsvpn         v2026.05.10.180256-27c7e11
 
 Environment:
   NO_COLOR=1   Disable ANSI colour output (auto-disabled when stdout is
@@ -137,6 +141,7 @@ main() {
         snowflake)       update_snowflake "$version" ;;
         webtunnel)       update_webtunnel "$version" ;;
         telemt)          update_telemt "$version" ;;
+        mdnsvpn)         update_mdnsvpn "$version" ;;
         *)               die "unknown binary $binary — see --help" ;;
     esac
 
@@ -661,6 +666,95 @@ update_telemt() {
     else
         warn "could not fetch upstream LICENSE for ${v} — the existing \
 vendor/LICENSES/TELEMT-LICENSE.md was left in place; verify it still matches the new release"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# MasterDnsVPN (DNS-tunnel VPN server)
+# ---------------------------------------------------------------------------
+#
+# Upstream releases ship a Go ELF inside `MasterDnsVPN_Server_Linux_AMD64.tar.gz`
+# with debug_info still present (~6.6 MB). We strip it before gzipping so the
+# bundled blob is ~1.9 MB instead of ~2.6 MB. The tarball is integrity-checked
+# against the matching line in upstream `SHA256SUMS.txt`.
+update_mdnsvpn() {
+    local version="$1"
+    # Upstream tags look like `v2026.05.10.180256-27c7e11`. We pass the
+    # tag verbatim into the URL — no `v` prefix stripping. The asset
+    # filename does not embed the version (just `_Linux_AMD64.tar.gz`).
+    log "fetching MasterDnsVPN server $version (Linux_AMD64.tar.gz)"
+    local asset="MasterDnsVPN_Server_Linux_AMD64.tar.gz"
+    local tgz="$WORK_DIR/$asset"
+    local sums_file="$WORK_DIR/SHA256SUMS.txt"
+    curl -sSL --fail-with-body -o "$tgz" \
+        "https://github.com/masterking32/MasterDnsVPN/releases/download/${version}/${asset}"
+    curl -sSL --fail-with-body -o "$sums_file" \
+        "https://github.com/masterking32/MasterDnsVPN/releases/download/${version}/SHA256SUMS.txt"
+
+    # Pluck the line for our asset from the global SHA256SUMS.txt. The
+    # file paths in there are prefixed with `release_assets/...` so we
+    # match on the basename.
+    local expected actual
+    expected="$(awk -v want="$asset" '
+        {
+            n = split($2, parts, "/")
+            if (parts[n] == want) { print $1; exit }
+        }' "$sums_file")"
+    if [ -z "$expected" ]; then
+        die "mdnsvpn: $asset not found in upstream SHA256SUMS.txt"
+    fi
+    actual="$(sha256sum "$tgz" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        die "mdnsvpn tarball SHA-256 mismatch:
+            expected $expected (from upstream SHA256SUMS.txt)
+            got      $actual"
+    fi
+    ok "tarball SHA-256 verified against upstream SHA256SUMS.txt"
+
+    log "extracting mdnsvpn server ELF"
+    (cd "$WORK_DIR" && tar xzf "$tgz")
+    # The tarball contains:
+    #   MasterDnsVPN_Server_Linux_AMD64_<version>      (Go ELF, ~6.6 MB)
+    #   server_config.toml                              (sample config)
+    # The ELF basename embeds the version; resolve by glob to avoid hard-
+    # coding the version string twice.
+    local elf
+    elf="$(find "$WORK_DIR" -maxdepth 1 -name 'MasterDnsVPN_Server_Linux_AMD64_*' -type f | head -1)"
+    [ -n "$elf" ] && [ -f "$elf" ] \
+        || die "mdnsvpn server ELF not present at expected path in tarball"
+    chmod +x "$elf"
+
+    verify_static "$elf" "mdnsvpn"
+
+    log "smoke-test"
+    "$elf" -version >/dev/null 2>&1 \
+        || warn "mdnsvpn -version returned non-zero (continuing anyway)"
+
+    # Strip debug info to shrink the bundled blob. The runtime extractor
+    # SHA-verifies the stripped ELF, so the pin SHA is computed AFTER
+    # strip. Catches "strip changed bytes between commits" (different
+    # strip versions can produce different bytes).
+    log "stripping debug info"
+    strip "$elf" \
+        || warn "strip failed — falling back to unstripped ELF"
+    log "  post-strip: $(file "$elf")"
+
+    local sha
+    sha="$(package_blob "$elf" "mdnsvpn")"
+    pin_update "$MDNSVPN_PIN" "MDNSVPN_VERSION" "$version"
+    pin_update "$MDNSVPN_PIN" "MDNSVPN_AMD64_SHA256" "$sha"
+    verify_pin_matches_blob "mdnsvpn" "$sha"
+
+    # Refresh the bundled LICENSE — MasterDnsVPN is MIT, the attribution
+    # requirement means we keep an in-tree copy alongside the binary.
+    log "refreshing vendor/LICENSES/MDNSVPN-LICENSE.md"
+    mkdir -p "$VENDOR_DIR/LICENSES"
+    if curl -sSL --fail-with-body -o "$VENDOR_DIR/LICENSES/MDNSVPN-LICENSE.md" \
+            "https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/LICENSE"; then
+        ok "license file refreshed"
+    else
+        warn "could not fetch upstream LICENSE — the existing \
+vendor/LICENSES/MDNSVPN-LICENSE.md was left in place; verify it still matches the new release"
     fi
 }
 

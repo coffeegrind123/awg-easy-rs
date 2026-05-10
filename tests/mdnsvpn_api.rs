@@ -1,0 +1,611 @@
+//! Integration tests for the MasterDnsVPN REST endpoints.
+//!
+//! Covers the admin flow an operator walks through to bootstrap the
+//! DNS-tunnel transport: read inbound → set domains → generate key →
+//! create client → download per-client config bundle → delete client.
+//! The actual mdnsvpn subprocess smoke test lives in
+//! `tests/mdnsvpn_config_smoke.rs` (gated by `#[ignore]`).
+
+mod common;
+
+use awg_easy_rs::{api, auth, db};
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use serde_json::{json, Value};
+use serial_test::serial;
+use tower::ServiceExt;
+
+fn seed() {
+    common::seed();
+}
+
+fn router() -> axum::Router {
+    api::build_router(api::AppState::new())
+}
+
+fn create_admin() -> (i64, String) {
+    let hash = auth::hash_password("adminpass").unwrap();
+    let id = db::create_user(&db::CreateUserParams {
+        username: "admin".into(),
+        password: hash,
+        email: None,
+        name: "Admin".into(),
+        role: 1,
+        totp_key: None,
+        totp_verified: false,
+        enabled: true,
+    })
+    .unwrap();
+    (id, "adminpass".into())
+}
+
+async fn login(app: &axum::Router, username: &str, password: &str) -> String {
+    let body = json!({ "username": username, "password": password });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let cookies: Vec<_> = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    cookies
+        .into_iter()
+        .find(|c| c.starts_with("awg_session="))
+        .unwrap()
+        .strip_prefix("awg_session=")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn json_get(app: &axum::Router, path: &str, cookie: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::COOKIE, format!("awg_session={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    (status, v)
+}
+
+async fn json_post(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, format!("awg_session={cookie}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    (status, v)
+}
+
+async fn raw_get(app: &axum::Router, path: &str, cookie: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::COOKIE, format!("awg_session={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    // QR-code SVGs encode every module as its own <rect/>, so they can
+    // run into the hundreds of KB for share strings as long as
+    // `mdnsvpn://b64?<base64>`. 1 MB cap is plenty.
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let s = String::from_utf8(body.to_vec()).unwrap_or_default();
+    (status, s)
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn mdnsvpn_inbound_requires_auth() {
+    seed();
+    let app = router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/admin/mdnsvpn/inbound")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn mdnsvpn_inbound_requires_admin() {
+    seed();
+    let hash = auth::hash_password("pw").unwrap();
+    db::create_user(&db::CreateUserParams {
+        username: "alice".into(),
+        password: hash,
+        email: None,
+        name: "Alice".into(),
+        role: 0,
+        totp_key: None,
+        totp_verified: false,
+        enabled: true,
+    })
+    .unwrap();
+    let app = router();
+    let cookie = login(&app, "alice", "pw").await;
+    let (status, _) = json_get(&app, "/api/admin/mdnsvpn/inbound", &cookie).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// Inbound CRUD
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn get_inbound_returns_seeded_defaults() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_get(&app, "/api/admin/mdnsvpn/inbound", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], "mdnsvpn0");
+    assert_eq!(body["port"], 53);
+    assert_eq!(body["bind"], "0.0.0.0");
+    assert_eq!(body["encryptionMethod"], 1);
+    assert_eq!(body["protocolType"], "SOCKS5");
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["hasEncryptionKey"], false);
+    // Default upstream resolvers are seeded.
+    assert_eq!(
+        body["dnsUpstreamServers"],
+        json!(["1.1.1.1:53", "1.0.0.1:53"])
+    );
+    // domains default to empty array
+    assert_eq!(body["domains"], json!([]));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_round_trip() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound",
+        &cookie,
+        json!({
+            "domains": ["v.example.com", "tunnel.example.com"],
+            "port": 5353,
+            "encryptionMethod": 5,
+            "protocolType": "SOCKS5",
+            "dnsUpstreamServers": ["9.9.9.9:53"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = json_get(&app, "/api/admin/mdnsvpn/inbound", &cookie).await;
+    assert_eq!(body["port"], 5353);
+    assert_eq!(body["encryptionMethod"], 5);
+    assert_eq!(body["domains"], json!(["v.example.com", "tunnel.example.com"]));
+    assert_eq!(body["dnsUpstreamServers"], json!(["9.9.9.9:53"]));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_rejects_invalid_port() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound",
+        &cookie,
+        json!({ "port": 0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("port"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_rejects_invalid_encryption_method() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound",
+        &cookie,
+        json!({ "encryptionMethod": 99 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("ENCRYPTION_METHOD"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_rejects_invalid_protocol_type() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound",
+        &cookie,
+        json!({ "protocolType": "HTTP" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_rejects_empty_domains() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) =
+        json_post(&app, "/api/admin/mdnsvpn/inbound", &cookie, json!({ "domains": [] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn regenerate_key_creates_key() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound/regenerate-key",
+        &cookie,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["encryptionKeySet"], true);
+    assert_eq!(body["encryptionKeyLength"], 32);
+
+    // hasEncryptionKey should now report true.
+    let (_, inbound) = json_get(&app, "/api/admin/mdnsvpn/inbound", &cookie).await;
+    assert_eq!(inbound["hasEncryptionKey"], true);
+    assert_eq!(inbound["encryptionKeyLength"], 32);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn regenerate_key_accepts_supplied_value() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let supplied = "0123456789abcdef0123456789abcdef";
+    let (status, _) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound/regenerate-key",
+        &cookie,
+        json!({ "key": supplied }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let stored = db::get_mdnsvpn_inbound().unwrap();
+    assert_eq!(stored.encryption_key, supplied);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn regenerate_key_rejects_too_short_supplied_value() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound/regenerate-key",
+        &cookie,
+        json!({ "key": "deadbeef" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Client CRUD
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn create_list_delete_client_round_trip() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "alice" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "alice");
+    assert_eq!(body["listenPort"], 18000);
+    let id = body["id"].as_i64().unwrap();
+
+    let (_, list) = json_get(&app, "/api/mdnsvpn/clients", &cookie).await;
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], id);
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/api/mdnsvpn/clients/{id}"))
+        .header(header::COOKIE, format!("awg_session={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (_, list) = json_get(&app, "/api/mdnsvpn/clients", &cookie).await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn create_client_requires_name() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "  " }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn create_client_rejects_invalid_listen_port() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "bob", "listen_port": 70000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn create_duplicate_name_is_rejected() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, _) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "alice" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "alice" }),
+    )
+    .await;
+    // UNIQUE(name) on the DB trips — the API surfaces 400 with a
+    // "create failed: …" message.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Share endpoints
+// ---------------------------------------------------------------------------
+
+async fn setup_for_share(app: &axum::Router, cookie: &str) -> i64 {
+    // Inbound: set domains + key so the supervisor would-be-runnable.
+    let (status, _) = json_post(
+        app,
+        "/api/admin/mdnsvpn/inbound",
+        cookie,
+        json!({ "domains": ["v.example.com"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_post(
+        app,
+        "/api/admin/mdnsvpn/inbound/regenerate-key",
+        cookie,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_post(
+        app,
+        "/api/mdnsvpn/clients",
+        cookie,
+        json!({ "name": "alice", "listen_port": 19000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    body["id"].as_i64().unwrap()
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_config_toml_download_works() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let id = setup_for_share(&app, &cookie).await;
+
+    let (status, body) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/config.toml"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#"DOMAINS = ["v.example.com"]"#));
+    assert!(body.contains("LISTEN_PORT = 19000"));
+    assert!(body.contains("ENCRYPTION_KEY ="));
+    assert!(body.contains("RESOLVERS ="));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_resolvers_txt_download_works() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let id = setup_for_share(&app, &cookie).await;
+
+    let (status, body) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/resolvers.txt"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    // Should contain default resolvers
+    assert!(body.contains("8.8.8.8"));
+    assert!(body.contains("1.1.1.1"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_config_json_download_works() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let id = setup_for_share(&app, &cookie).await;
+
+    let (status, body) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/config.json"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_str(&body).expect("returned JSON parses");
+    assert_eq!(v["DOMAINS"][0], "v.example.com");
+    assert_eq!(v["LISTEN_PORT"], 19000);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_url_returns_mdnsvpn_scheme() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let id = setup_for_share(&app, &cookie).await;
+
+    let (status, body) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/share"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with("mdnsvpn://b64?"));
+    assert!(body.len() > "mdnsvpn://b64?".len() + 20);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_fails_when_inbound_missing_key() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    // Domains set, but no key generated yet.
+    let (_, _) = json_post(
+        &app,
+        "/api/admin/mdnsvpn/inbound",
+        &cookie,
+        json!({ "domains": ["v.example.com"] }),
+    )
+    .await;
+    let (_, created) = json_post(
+        &app,
+        "/api/mdnsvpn/clients",
+        &cookie,
+        json!({ "name": "alice" }),
+    )
+    .await;
+    let id = created["id"].as_i64().unwrap();
+
+    let (status, _) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/config.toml"), &cookie).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_qrcode_returns_svg() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let id = setup_for_share(&app, &cookie).await;
+
+    let (status, body) =
+        raw_get(&app, &format!("/api/mdnsvpn/clients/{id}/qrcode.svg"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"));
+}

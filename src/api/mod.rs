@@ -13,6 +13,7 @@ pub mod routes;
 pub mod session;
 pub mod setup;
 pub mod dns;
+pub mod mdnsvpn;
 pub mod mtproxy;
 pub mod xray;
 
@@ -250,6 +251,54 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/admin/mtproxy/users/:username/qrcode.svg",
             axum::routing::get(mtproxy::user_qrcode),
+        )
+        // MasterDnsVPN (DNS-tunnel mode) — admin inbound + supervisor
+        .route(
+            "/admin/mdnsvpn/inbound",
+            axum::routing::get(mdnsvpn::get_inbound).post(mdnsvpn::update_inbound),
+        )
+        .route(
+            "/admin/mdnsvpn/inbound/regenerate-key",
+            axum::routing::post(mdnsvpn::regenerate_key),
+        )
+        .route(
+            "/admin/mdnsvpn/status",
+            axum::routing::get(mdnsvpn::supervisor_status),
+        )
+        .route(
+            "/admin/mdnsvpn/restart",
+            axum::routing::post(mdnsvpn::restart),
+        )
+        // MasterDnsVPN clients
+        .route(
+            "/mdnsvpn/clients",
+            axum::routing::get(mdnsvpn::list_clients).post(mdnsvpn::create_client),
+        )
+        .route(
+            "/mdnsvpn/clients/:id",
+            axum::routing::get(mdnsvpn::get_client)
+                .post(mdnsvpn::update_client)
+                .delete(mdnsvpn::delete_client),
+        )
+        .route(
+            "/mdnsvpn/clients/:id/config.toml",
+            axum::routing::get(mdnsvpn::client_config_toml),
+        )
+        .route(
+            "/mdnsvpn/clients/:id/resolvers.txt",
+            axum::routing::get(mdnsvpn::client_resolvers_txt),
+        )
+        .route(
+            "/mdnsvpn/clients/:id/config.json",
+            axum::routing::get(mdnsvpn::client_config_json),
+        )
+        .route(
+            "/mdnsvpn/clients/:id/share",
+            axum::routing::get(mdnsvpn::client_share_url),
+        )
+        .route(
+            "/mdnsvpn/clients/:id/qrcode.svg",
+            axum::routing::get(mdnsvpn::client_qrcode),
         )
         // Xray clients
         .route(

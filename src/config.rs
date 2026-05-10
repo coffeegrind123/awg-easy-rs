@@ -41,6 +41,12 @@ pub struct Config {
     /// works but means the tlsfront cache rebuilds and the binary
     /// re-extracts.
     pub mtproxy_dir: String,
+    /// Directory where the bundled MasterDnsVPN ELF is extracted, plus
+    /// the generated `server_config.toml` and the `encrypt_key.txt`
+    /// keyfile the server reads at startup. Defaults to
+    /// `<wg_conf_dir>/mdnsvpn`. Persisting this on a docker volume
+    /// avoids re-extracting the binary on every restart.
+    pub mdnsvpn_dir: String,
 }
 
 pub fn get_env(key: &str, default: &str) -> String {
@@ -98,6 +104,8 @@ impl Config {
             env::var("WG_EASY_DNS_DIR").unwrap_or_else(|_| format!("{}/dns", wg_conf_dir));
         let mtproxy_dir = env::var("WG_EASY_MTPROXY_DIR")
             .unwrap_or_else(|_| format!("{}/mtproxy", wg_conf_dir));
+        let mdnsvpn_dir = env::var("WG_EASY_MDNSVPN_DIR")
+            .unwrap_or_else(|_| format!("{}/mdnsvpn", wg_conf_dir));
 
         Config {
             port,
@@ -120,6 +128,7 @@ impl Config {
             xray_binary_override,
             dns_dir,
             mtproxy_dir,
+            mdnsvpn_dir,
         }
     }
 }

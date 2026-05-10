@@ -1443,6 +1443,166 @@ async function showAdminTab(tab, e) {
             <button type="submit" class="btn btn--primary">Save changes</button>
           </div>
         </form>`;
+    } else if (tab === 'mdnsvpn') {
+      const inbound = await GET('/api/admin/mdnsvpn/inbound');
+      const status = await GET('/api/admin/mdnsvpn/status').catch(() => null);
+      const stateLabel = status ? (
+        status.state === 'running' ? `<span class="pill pill--ok">Running · pid ${status.pid} · ${Math.round(status.uptime_seconds || 0)}s</span>`
+        : status.state === 'crashed' ? `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed × ${status.restart_attempts}</span>`
+        : `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`
+      ) : '<span class="pill">unknown</span>';
+      const bundleNote = inbound.isBundled
+        ? `Bundled MasterDnsVPN ${esc(inbound.version || '?')} · supervisor: ${stateLabel}`
+        : `<span class="pill pill--err">MasterDnsVPN not bundled in this build</span>`;
+      const domainsArr = Array.isArray(inbound.domains) ? inbound.domains : [];
+      const upstreamsArr = Array.isArray(inbound.dnsUpstreamServers) ? inbound.dnsUpstreamServers : [];
+      const encMethods = [
+        ['0', 'None (no encryption)'],
+        ['1', 'XOR (lightweight)'],
+        ['2', 'ChaCha20'],
+        ['3', 'AES-128-GCM'],
+        ['4', 'AES-192-GCM'],
+        ['5', 'AES-256-GCM (strongest)'],
+      ];
+      const protoTypes = [
+        ['SOCKS5', 'SOCKS5 (clients pick destination per stream)'],
+        ['TCP', 'TCP (every connection forwards to FORWARD_IP:FORWARD_PORT)'],
+      ];
+      el.innerHTML = `
+        <div class="notice notice--info" style="margin-bottom:14px">
+          <svg><use href="#i-shield"/></svg>
+          <div>DNS-tunnel VPN via <a href="https://github.com/masterking32/MasterDnsVPN" target="_blank" rel="noopener">MasterDnsVPN</a>. Clients pack TCP/SOCKS5 traffic into DNS queries through public resolvers; this server listens on UDP/53 for tunnel envelopes whose <span class="mono">QNAME</span> matches one of the configured tunnel domains. <b>Requires</b>: a domain you control, with an <span class="mono">NS</span> record delegating the tunnel subdomain to this server's public IP.</div>
+        </div>
+        <div style="margin-bottom:14px">${bundleNote}</div>
+        <form onsubmit="saveMdnsvpnInbound(event)">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">DNS-tunnel inbound</div>
+                <div class="card-sub">One UDP listener for tunneled DNS traffic. Encryption key is shared by every client; per-peer share configs live in the Clients tab.</div>
+              </div>
+              <label class="toggle ${inbound.enabled ? 'is-on' : ''}" title="Master switch — turning this off stops the mdnsvpn server. The supervisor refuses to start until a key is generated and at least one domain is set.">
+                <input type="checkbox" id="adm-md-enabled" ${inbound.enabled ? 'checked' : ''}>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-label">Enabled</span>
+              </label>
+            </div>
+            <div class="card-body">
+              <div class="stack">
+                <div class="field">
+                  <label class="field-label" for="adm-md-domains" title="One NS-delegated FQDN per line. Each must be the full tunnel subdomain you delegated to this server (e.g. v.example.com).">Tunnel domains <span class="opt">one per line</span></label>
+                  <textarea id="adm-md-domains" class="mono-input" rows="3" placeholder="v.example.com">${esc(domainsArr.join('\n'))}</textarea>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-md-port" title="UDP port the mdnsvpn server binds. Default 53 — most public resolvers will only forward queries to authoritatives on :53.">Listen port</label>
+                    <input type="number" id="adm-md-port" class="mono-input" value="${inbound.port || 53}">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-md-bind" title="Bind address. Almost always 0.0.0.0; only change to bind a specific interface.">Bind address</label>
+                    <input type="text" id="adm-md-bind" class="mono-input" value="${esc(inbound.bind || '0.0.0.0')}">
+                  </div>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-md-enc-method" title="Symmetric cipher applied to every payload. Must match every client. Method 0 disables encryption — only use that for debugging.">Encryption method</label>
+                    <select id="adm-md-enc-method" class="mono-input">
+                      ${encMethods.map(([v, label]) => `<option value="${v}" ${String(inbound.encryptionMethod) === v ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-md-proto" title="SOCKS5 = clients choose the destination per stream. TCP = every connection forwards to a fixed FORWARD_IP:FORWARD_PORT.">Protocol type</label>
+                    <select id="adm-md-proto" class="mono-input">
+                      ${protoTypes.map(([v, label]) => `<option value="${v}" ${inbound.protocolType === v ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" title="The shared key every client uses. Generated server-side; per-peer share configs embed it. Click Regenerate to roll a new value (every existing client config will need to be redistributed).">Encryption key</label>
+                  <div style="display:flex;gap:10px;align-items:center">
+                    <span class="pill ${inbound.hasEncryptionKey ? 'pill--ok' : 'pill--err'}">${inbound.hasEncryptionKey ? `Set · ${inbound.encryptionKeyLength} hex chars` : 'Not set'}</span>
+                    <button type="button" class="btn btn--ghost btn--sm" onclick="regenerateMdnsvpnKey()"><svg><use href="#i-refresh"/></svg> Regenerate</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-md-upstreams" title="Upstream resolvers used to satisfy DNS queries clients tunnel via DNS_QUERY_REQ. Comma-separated host:port pairs.">Upstream DNS resolvers</label>
+                  <input type="text" id="adm-md-upstreams" class="mono-input" value="${esc(upstreamsArr.join(', '))}" placeholder="1.1.1.1:53, 1.0.0.1:53">
+                  <p class="field-help">Comma-separated <span class="mono">host:port</span> entries.</p>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-md-fwd-ip" title="Used in TCP mode (every connection forwards here) OR in SOCKS5 mode when use_external_socks5 is on (chains through an upstream SOCKS5 proxy).">Forward IP</label>
+                    <input type="text" id="adm-md-fwd-ip" class="mono-input" value="${esc(inbound.forwardIp || '')}" placeholder="(unused unless TCP or external SOCKS5)">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-md-fwd-port" title="Companion port for forward_ip. 0 means unused.">Forward port</label>
+                    <input type="number" id="adm-md-fwd-port" class="mono-input" value="${inbound.forwardPort || 0}">
+                  </div>
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${inbound.useExternalSocks5 ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-md-ext-socks" ${inbound.useExternalSocks5 ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="In SOCKS5 mode, chain outbound connections through another SOCKS5 proxy at FORWARD_IP:FORWARD_PORT instead of connecting directly.">Use external SOCKS5 upstream</label>
+                  </div>
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${inbound.socks5Auth ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-md-socks-auth" ${inbound.socks5Auth ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="Send username/password to the upstream SOCKS5 proxy. Only meaningful with use_external_socks5 = on.">Upstream SOCKS5 auth</label>
+                  </div>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-md-socks-user">SOCKS5 user</label>
+                    <input type="text" id="adm-md-socks-user" class="mono-input" value="${esc(inbound.socks5User || '')}">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-md-socks-pass">SOCKS5 password</label>
+                    <input type="password" id="adm-md-socks-pass" class="mono-input" placeholder="${inbound.hasSocks5Pass ? '(stored — set to overwrite)' : '(empty)'}">
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-md-extra" title="Free-form TOML appended verbatim to server_config.toml. Escape hatch for keys the UI doesn't model (extra ARQ tunables, MTU bounds, etc.).">Additional config (TOML)</label>
+                  <textarea id="adm-md-extra" class="mono-input" rows="3" placeholder="(empty — e.g. MAX_PACKET_SIZE = 65500)">${esc(inbound.additionalConfig || '')}</textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="save-bar">
+            <span class="changed">Saving rewrites <span class="mono">server_config.toml</span> and restarts mdnsvpn (no SIGHUP reload upstream).</span>
+            <div class="save-bar-spacer"></div>
+            <button type="button" class="btn btn--ghost" onclick="restartMdnsvpn()"><svg><use href="#i-refresh"/></svg> Restart mdnsvpn</button>
+            <button type="submit" class="btn btn--primary">Save changes</button>
+          </div>
+        </form>`;
+    } else if (tab === 'mdnsvpn-clients') {
+      const clients = await GET('/api/mdnsvpn/clients');
+      const rows = clients.length === 0
+        ? '<div class="empty"><h3>No DNS-tunnel clients yet</h3><p>Click <b>Add client</b> to mint a per-peer share bundle. Every client uses the singleton encryption key; this list controls who has a config slot.</p></div>'
+        : `<table class="table">
+            <thead><tr>
+              <th>Name</th><th>Local SOCKS5</th><th>Resolvers</th><th>Expires</th><th>State</th><th style="text-align:right">Share</th>
+            </tr></thead>
+            <tbody>${clients.map(c => mdnsvpnClientRow(c)).join('')}</tbody>
+          </table>`;
+      el.innerHTML = `
+        <div style="margin-bottom:14px;display:flex;gap:8px;align-items:center">
+          <span class="pill" title="Per-client records are bookkeeping only — MasterDnsVPN itself authenticates every tunnel via the singleton encryption key on the inbound row.">Per-client share slots</span>
+          <div class="save-bar-spacer"></div>
+          <button type="button" class="btn btn--ghost btn--sm" onclick="showAdminTab('mdnsvpn-clients')"><svg><use href="#i-refresh"/></svg> Refresh</button>
+          <button type="button" class="btn btn--primary btn--sm" onclick="addMdnsvpnClient()"><svg><use href="#i-plus"/></svg> Add client</button>
+        </div>
+        <div class="card">
+          <div class="card-body" style="padding:0">
+            ${rows}
+          </div>
+        </div>`;
     } else if (tab === 'mtproxy-users') {
       const data = await GET('/api/admin/mtproxy/users');
       const users = data.users || [];
@@ -2122,6 +2282,185 @@ async function showMtproxyQr(username, url) {
       const w = window.open('', '_blank', 'width=420,height=520');
       if (w) {
         w.document.write('<html><head><title>QR — ' + esc(username) + '</title></head><body style="margin:0;display:flex;align-items:center;justify-content:center;background:#111">' + svg + '</body></html>');
+      }
+    }
+  } catch(e) { showToast('QR fetch failed: ' + e.message, 'error'); }
+}
+
+// ---------------------------------------------------------------------------
+// MasterDnsVPN (DNS-tunnel mode) handlers
+// ---------------------------------------------------------------------------
+
+function mdnsvpnClientRow(c) {
+  const resolvers = Array.isArray(c.resolvers)
+    ? c.resolvers
+    : (typeof c.resolvers === 'string' ? (c.resolvers ? [c.resolvers] : []) : []);
+  const resolverPreview = resolvers.length === 0
+    ? '<span class="sub">— (using default list)</span>'
+    : `<span class="mono" title="${esc(resolvers.join('\n'))}">${esc(resolvers.length + ' resolver' + (resolvers.length === 1 ? '' : 's'))}</span>`;
+  const stateBadge = c.enabled
+    ? '<span class="pill pill--ok">enabled</span>'
+    : '<span class="pill">disabled</span>';
+  const expires = c.expiresAt
+    ? `<span class="mono">${esc(c.expiresAt)}</span>`
+    : '<span class="sub">never</span>';
+  return `
+    <tr data-id="${c.id}">
+      <td><b>${esc(c.name)}</b></td>
+      <td><span class="mono">127.0.0.1:${c.listenPort}</span>${c.socks5User ? ` <span class="pill" title="Local SOCKS5 auth on (user=${esc(c.socks5User)})">auth</span>` : ''}</td>
+      <td>${resolverPreview}</td>
+      <td>${expires}</td>
+      <td>${stateBadge}</td>
+      <td style="text-align:right">
+        <button class="btn btn--quiet btn--icon" title="Download client_config.toml" onclick="downloadMdnsvpnFile(${c.id}, 'config.toml')"><svg><use href="#i-download"/></svg></button>
+        <button class="btn btn--quiet btn--icon" title="Download client_resolvers.txt" onclick="downloadMdnsvpnFile(${c.id}, 'resolvers.txt')">res</button>
+        <button class="btn btn--quiet btn--icon" title="Show share URL + QR (mdnsvpn://b64?... — paste into mdnsvpn -json_base64)" onclick="showMdnsvpnQr(${c.id}, '${escJs(c.name)}')">QR</button>
+        <button class="btn btn--quiet btn--icon" title="${c.enabled ? 'Disable' : 'Enable'} this client" onclick="toggleMdnsvpnClient(${c.id}, ${!c.enabled})"><svg><use href="#i-${c.enabled ? 'eye' : 'check'}"/></svg></button>
+        <button class="btn btn--quiet btn--icon" title="Delete client" onclick="deleteMdnsvpnClient(${c.id})"><svg><use href="#i-trash"/></svg></button>
+      </td>
+    </tr>`;
+}
+
+async function saveMdnsvpnInbound(e) {
+  e.preventDefault();
+  // Domains: one per line, blank lines skipped.
+  const domains = $('adm-md-domains').value
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  if (domains.length === 0) {
+    showToast('At least one tunnel domain is required', 'error');
+    return;
+  }
+  // Upstreams: comma-separated host:port entries.
+  const upstreams = $('adm-md-upstreams').value
+    .split(/[\s,]+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+
+  const body = {
+    enabled: $('adm-md-enabled').checked,
+    domains,
+    port: parseInt($('adm-md-port').value) || 53,
+    bind: $('adm-md-bind').value.trim() || '0.0.0.0',
+    encryptionMethod: parseInt($('adm-md-enc-method').value),
+    protocolType: $('adm-md-proto').value,
+    dnsUpstreamServers: upstreams,
+    forwardIp: $('adm-md-fwd-ip').value.trim(),
+    forwardPort: parseInt($('adm-md-fwd-port').value) || 0,
+    useExternalSocks5: $('adm-md-ext-socks').checked,
+    socks5Auth: $('adm-md-socks-auth').checked,
+    socks5User: $('adm-md-socks-user').value,
+    additionalConfig: $('adm-md-extra').value,
+  };
+  const passVal = $('adm-md-socks-pass').value;
+  if (passVal) body.socks5Pass = passVal;
+
+  if (body.protocolType === 'TCP' && (!body.forwardIp || !body.forwardPort)) {
+    showToast('TCP mode requires forwardIp and forwardPort', 'error');
+    return;
+  }
+  if (body.useExternalSocks5 && (!body.forwardIp || !body.forwardPort)) {
+    showToast('External SOCKS5 requires forwardIp and forwardPort', 'error');
+    return;
+  }
+  try {
+    await POST('/api/admin/mdnsvpn/inbound', body);
+    showToast('Saved', 'success');
+    showAdminTab('mdnsvpn');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function regenerateMdnsvpnKey() {
+  if (!confirm('Regenerate the encryption key? Every existing client config becomes invalid until you redistribute the new bundle.')) return;
+  try {
+    const out = await POST('/api/admin/mdnsvpn/inbound/regenerate-key', {});
+    showToast(`New key generated (${out.encryptionKeyLength} hex chars)`, 'success');
+    showAdminTab('mdnsvpn');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function restartMdnsvpn() {
+  try {
+    await POST('/api/admin/mdnsvpn/restart', {});
+    showToast('mdnsvpn restarted', 'success');
+    showAdminTab('mdnsvpn');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function addMdnsvpnClient() {
+  const name = prompt('Name for the new DNS-tunnel client (letters, digits, "-_."):');
+  if (!name) return;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+    showToast('Name must be 1..=64 chars from [A-Za-z0-9._-]', 'error');
+    return;
+  }
+  const portStr = prompt('Local SOCKS5 listen port (default 18000):', '18000');
+  if (portStr === null) return;
+  const listenPort = parseInt(portStr) || 18000;
+  try {
+    await POST('/api/mdnsvpn/clients', { name, listen_port: listenPort });
+    showToast(`Client ${name} created`, 'success');
+    showAdminTab('mdnsvpn-clients');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function toggleMdnsvpnClient(id, newEnabled) {
+  try {
+    await POST('/api/mdnsvpn/clients/' + id, { enabled: newEnabled });
+    showToast(newEnabled ? 'Client enabled' : 'Client disabled', 'success');
+    showAdminTab('mdnsvpn-clients');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteMdnsvpnClient(id) {
+  if (!confirm('Delete this DNS-tunnel client? Its share bundle stops working.')) return;
+  try {
+    await fetch('/api/mdnsvpn/clients/' + id, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }).then(r => { if (!r.ok) throw new Error('delete failed: ' + r.status); });
+    showToast('Client deleted', 'success');
+    showAdminTab('mdnsvpn-clients');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function downloadMdnsvpnFile(id, kind) {
+  // Direct navigation triggers the browser's normal download flow; the
+  // /config.toml and /resolvers.txt endpoints emit Content-Disposition
+  // attachment so the file lands in Downloads with the right name.
+  window.location.href = '/api/mdnsvpn/clients/' + id + '/' + kind;
+}
+
+async function showMdnsvpnQr(id, name) {
+  try {
+    const resp = await fetch(
+      '/api/mdnsvpn/clients/' + id + '/qrcode.svg',
+      { credentials: 'same-origin' }
+    );
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(body || resp.statusText);
+    }
+    const svg = await resp.text();
+    // Also fetch the textual share URL so the modal can show both QR + URL.
+    let url = '';
+    try {
+      const r = await fetch('/api/mdnsvpn/clients/' + id + '/share', { credentials: 'same-origin' });
+      if (r.ok) url = await r.text();
+    } catch { /* non-fatal */ }
+    const modal = $('modal-qr');
+    if (modal) {
+      $('modal-qr-title').textContent = 'DNS-tunnel QR — ' + name;
+      $('modal-qr-body').innerHTML = svg
+        + '<p style="font-size:12px;opacity:.7;margin-top:10px">Decode the base64 payload and feed it to <span class="mono">mdnsvpn -json_base64 &lt;blob&gt;</span>, or save the QR to scan on a phone.</p>'
+        + (url ? '<code style="display:block;padding:8px;margin-top:6px;background:rgba(0,0,0,.25);border-radius:6px;word-break:break-all;font-size:11px">'
+          + esc(url) + '</code>' : '');
+      modal.classList.add('active');
+    } else {
+      const w = window.open('', '_blank', 'width=420,height=520');
+      if (w) {
+        w.document.write('<html><head><title>QR — ' + esc(name) + '</title></head><body style="margin:0;display:flex;align-items:center;justify-content:center;background:#111">' + svg + '</body></html>');
       }
     }
   } catch(e) { showToast('QR fetch failed: ' + e.message, 'error'); }

@@ -6,6 +6,7 @@ The pinned **versions + SHA-256 hashes** are committed:
 
 - `XRAY_VERSION`        — Xray-core
 - `TELEMT_VERSION`      — telemt (Telegram MTProxy)
+- `MDNSVPN_VERSION`     — MasterDnsVPN (DNS-tunnel VPN server)
 - `DNS_BUNDLE_VERSION`  — dnscrypt-proxy + tor + lyrebird + snowflake + webtunnel
 - `LICENSES/`           — preserved upstream LICENSE files (legal attribution)
 - `update.sh`           — curation tool: download/build, SHA-verify, gzip into place
@@ -257,4 +258,67 @@ Bumping telemt is a three-step process — `vendor/update.sh telemt
    tarball SHA recorded above.
 
 The build will refuse to start if `TELEMT_VERSION` and the vendored blob
+disagree.
+
+---
+
+## `mdnsvpn-linux-amd64.gz` (`mdnsvpn_bundled` cfg)
+
+Pinned [masterking32/MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN)
+release `v2026.05.10.180256-27c7e11` server ELF, gzip-compressed (level 9).
+MasterDnsVPN is a Go DNS-tunnel VPN: clients fragment + encrypt TCP/SOCKS5
+traffic into DNS queries through public resolvers, the server listens on UDP/53
+for tunnel envelopes (via NS-delegated subdomain) and re-emits the inner TCP
+through a real socks5/forwarder. Embedded the same way as Xray + telemt —
+`include_bytes!` at build time, runtime extraction with SHA verification.
+
+### Provenance
+
+Downloaded from the [v2026.05.10.180256-27c7e11 release](https://github.com/masterking32/MasterDnsVPN/releases/tag/v2026.05.10.180256-27c7e11)
+on 2026-05-10:
+
+- `MasterDnsVPN_Server_Linux_AMD64.tar.gz` — SHA256 `3c6233ec14d072556e4c2bfd9212dd06901c0fa0df007f2bca59b84007fe8537` (verified against the upstream `SHA256SUMS.txt`)
+
+The Go ELF inside is `statically linked` (per `file(1)`), so it runs unchanged
+on any libc x86_64 host. After extraction it was `strip`-ed (debug info shaves
+~2.1 MB off the upstream 6.6 MB build) and re-compressed with `gzip -9`.
+Decompressed-ELF SHA-256 (used by the runtime extractor to detect cache
+staleness): `c596b64374155a61689c5739b7c77fcf918ff7f6cb588016ac2912eba2f8fd80` —
+recorded in `MDNSVPN_VERSION`.
+
+### Default posture
+
+The DNS-tunnel listener is **off by default**. Even with `cfg(mdnsvpn_bundled)`
+set, the supervisor refuses to spawn until the operator:
+
+1. Owns a domain and creates an `NS` delegation pointing the tunnel
+   subdomain at this server's public IP (the upstream README walks
+   through this — there is no way to skip it).
+2. Sets `domain`, `port` (UDP/53 is the default), and an encryption key
+   in the admin UI.
+3. Flips `enabled = true`.
+
+This matches the Xray, telemt, and DNS-bundle defaults — censorship
+circumvention is opt-in, never on out of the box.
+
+### Licensing
+
+MasterDnsVPN is distributed under the **MIT License**. The full text is
+mirrored at [`vendor/LICENSES/MDNSVPN-LICENSE.md`](LICENSES/MDNSVPN-LICENSE.md);
+upstream copy at <https://github.com/masterking32/MasterDnsVPN/blob/main/LICENSE>.
+Redistribution of the unmodified (modulo strip) binary as part of awg-easy-rs is
+permitted under the MIT terms, provided the copyright notice and license remain
+preserved — `vendor/LICENSES/MDNSVPN-LICENSE.md` is exactly that preservation.
+
+### Updating
+
+`vendor/update.sh mdnsvpn <version>` automates the bump:
+
+1. Downloads the new `MasterDnsVPN_Server_Linux_AMD64.tar.gz` and verifies
+   the matching line from upstream `SHA256SUMS.txt`.
+2. Extracts the server ELF; runs `strip`; re-gzips with `gzip -9`.
+3. Updates `MDNSVPN_VERSION` (version + uncompressed-ELF SHA-256) and
+   the tarball SHA recorded above.
+
+The build will refuse to start if `MDNSVPN_VERSION` and the vendored blob
 disagree.
