@@ -19,6 +19,7 @@
 #   vendor/update.sh lyrebird        0.8.2
 #   vendor/update.sh snowflake       v2.13.2
 #   vendor/update.sh webtunnel       v0.0.5
+#   vendor/update.sh telemt          3.4.12
 #
 # After a successful run:
 #   - vendor/<name>-linux-amd64.gz is replaced with the new (truly static)
@@ -46,6 +47,7 @@ VENDOR_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$VENDOR_DIR/.." && pwd)"
 XRAY_PIN="$VENDOR_DIR/XRAY_VERSION"
 DNS_PIN="$VENDOR_DIR/DNS_BUNDLE_VERSION"
+TELEMT_PIN="$VENDOR_DIR/TELEMT_VERSION"
 
 # Working directory for downloads + builds. Cleared on exit.
 WORK_DIR=""
@@ -92,6 +94,8 @@ Binaries:
   lyrebird        Built from Go source (CGO_ENABLED=0, fully static)
   snowflake       Built from Go source (CGO_ENABLED=0, fully static)
   webtunnel       Built from Go source (CGO_ENABLED=0, fully static)
+  telemt          Pre-built upstream release (GitHub, x86_64-linux-musl,
+                  .sha256 companion verified)
 
 Examples:
   vendor/update.sh xray            v26.3.28
@@ -100,6 +104,7 @@ Examples:
   vendor/update.sh lyrebird        0.8.2
   vendor/update.sh snowflake       v2.13.2
   vendor/update.sh webtunnel       v0.0.5
+  vendor/update.sh telemt          3.4.12
 
 Environment:
   NO_COLOR=1   Disable ANSI colour output (auto-disabled when stdout is
@@ -131,6 +136,7 @@ main() {
         lyrebird)        update_lyrebird "$version" ;;
         snowflake)       update_snowflake "$version" ;;
         webtunnel)       update_webtunnel "$version" ;;
+        telemt)          update_telemt "$version" ;;
         *)               die "unknown binary $binary — see --help" ;;
     esac
 
@@ -491,6 +497,62 @@ update_webtunnel() {
         "./main/client" \
         "webtunnel-client" \
         "webtunnel"
+}
+
+update_telemt() {
+    local version="$1"
+    # Upstream tags are unprefixed (e.g. 3.4.11). The release publishes
+    # both glibc and musl variants for x86_64; we want the static-musl
+    # one so the bundled binary runs on any libc host.
+    local v="${version#v}"
+    log "fetching telemt $v (x86_64-linux-musl)"
+    local tgz="$WORK_DIR/telemt-x86_64-linux-musl.tar.gz"
+    local sha_file="$WORK_DIR/telemt-x86_64-linux-musl.tar.gz.sha256"
+    curl -sSL --fail-with-body -o "$tgz" \
+        "https://github.com/telemt/telemt/releases/download/${v}/telemt-x86_64-linux-musl.tar.gz"
+    curl -sSL --fail-with-body -o "$sha_file" \
+        "https://github.com/telemt/telemt/releases/download/${v}/telemt-x86_64-linux-musl.tar.gz.sha256"
+
+    local expected actual
+    expected="$(awk '{print $1; exit}' "$sha_file")"
+    actual="$(sha256sum "$tgz" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        die "telemt tarball SHA-256 mismatch:
+            expected $expected (from upstream .sha256)
+            got      $actual"
+    fi
+    ok "tarball SHA-256 verified against upstream .sha256"
+
+    log "extracting telemt ELF"
+    (cd "$WORK_DIR" && tar xzf "$tgz")
+    local elf="$WORK_DIR/telemt"
+    [ -f "$elf" ] || die "telemt binary not present at expected path in tarball"
+    chmod +x "$elf"
+
+    verify_static "$elf" "telemt"
+
+    log "smoke-test"
+    "$elf" --help >/dev/null 2>&1 \
+        || warn "telemt --help returned non-zero (may be normal — the binary uses positional args)"
+
+    local sha
+    sha="$(package_blob "$elf" "telemt")"
+    pin_update "$TELEMT_PIN" "TELEMT_VERSION" "$v"
+    pin_update "$TELEMT_PIN" "TELEMT_AMD64_SHA256" "$sha"
+    verify_pin_matches_blob "telemt" "$sha"
+
+    # Refresh the bundled LICENSE — operators bumping versions need the
+    # right license file alongside the binary so the TPL3 attribution
+    # condition stays satisfied.
+    log "refreshing vendor/LICENSES/TELEMT-LICENSE.md"
+    mkdir -p "$VENDOR_DIR/LICENSES"
+    if curl -sSL --fail-with-body -o "$VENDOR_DIR/LICENSES/TELEMT-LICENSE.md" \
+            "https://raw.githubusercontent.com/telemt/telemt/${v}/LICENSE"; then
+        ok "license file refreshed"
+    else
+        warn "could not fetch upstream LICENSE for ${v} — the existing \
+vendor/LICENSES/TELEMT-LICENSE.md was left in place; verify it still matches the new release"
+    fi
 }
 
 # ---------------------------------------------------------------------------

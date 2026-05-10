@@ -1,18 +1,21 @@
 //! Build-time embedding of the vendored ELFs for the target architecture.
 //!
-//! Two independent bundles, each gated by its own `cfg`:
+//! Three independent bundles, each gated by its own `cfg`:
 //!
-//! - `xray_bundled`  — Xray-core (single ELF, ~13 MB compressed) for the
+//! - `xray_bundled`   — Xray-core (single ELF, ~13 MB compressed) for the
 //!   Browsing-mode VLESS+Reality+Vision flow. Pinned in
 //!   `vendor/XRAY_VERSION`.
-//! - `dns_bundled`   — DNS stack: dnscrypt-proxy, tor, lyrebird,
+//! - `dns_bundled`    — DNS stack: dnscrypt-proxy, tor, lyrebird,
 //!   snowflake, webtunnel. Five ELFs per architecture. Pinned in
 //!   `vendor/DNS_BUNDLE_VERSION`. The bundle is all-or-nothing per
 //!   target arch — partial bundles are intentionally rejected so
 //!   runtime supervisor code can rely on every component being present.
+//! - `telemt_bundled` — telemt (single ELF, ~6 MB compressed) — Rust +
+//!   Tokio MTProxy server for Telegram (Fake-TLS / SNI fronting, per-user
+//!   secrets via runtime HTTP API). Pinned in `vendor/TELEMT_VERSION`.
 //!
-//! Both bundles surface their version + per-binary SHA-256 to the rest
-//! of the crate via `cargo:rustc-env=AWG_EASY_*` constants so the
+//! All three bundles surface their version + per-binary SHA-256 to the
+//! rest of the crate via `cargo:rustc-env=AWG_EASY_*` constants so the
 //! runtime extractor can verify-on-extract and the `/about` page can
 //! display what shipped.
 
@@ -53,6 +56,7 @@ fn main() {
 
     process_xray_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
     process_dns_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
+    process_telemt_bundle(&target_os, &target_arch, &out_dir, &manifest_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +241,60 @@ fn process_dns_bundle(
         println!("cargo:rustc-env=AWG_EASY_DNS_{}_SHA256={sha}", bin.env_prefix);
     }
     println!("cargo:rustc-cfg=dns_bundled");
+}
+
+// ---------------------------------------------------------------------------
+// Telemt bundle (Telegram MTProxy)
+// ---------------------------------------------------------------------------
+
+fn process_telemt_bundle(
+    target_os: &str,
+    target_arch: &str,
+    out_dir: &PathBuf,
+    manifest_dir: &PathBuf,
+) {
+    println!("cargo:rerun-if-changed=vendor/TELEMT_VERSION");
+    println!("cargo:rerun-if-changed=vendor/telemt-linux-amd64.gz");
+
+    let version_path = manifest_dir.join("vendor/TELEMT_VERSION");
+    let version_text = fs::read_to_string(&version_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", version_path.display()));
+    let kv = parse_kv(&version_text);
+    let telemt_version = kv
+        .get("TELEMT_VERSION")
+        .expect("TELEMT_VERSION not set in vendor/TELEMT_VERSION");
+
+    // Same arch story as the rest of the vendor tree: x86_64-linux only.
+    let bundle = match (target_os, target_arch) {
+        ("linux", "x86_64") => Some(("telemt-linux-amd64.gz", "TELEMT_AMD64_SHA256")),
+        _ => None,
+    };
+
+    if let Some((blob_name, sha_key)) = bundle {
+        let blob_src = manifest_dir.join("vendor").join(blob_name);
+        let blob_dst = out_dir.join("telemt.gz");
+        fs::copy(&blob_src, &blob_dst)
+            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", blob_src.display(), blob_dst.display()));
+
+        let expected_sha = kv.get(sha_key).unwrap_or_else(|| {
+            panic!(
+                "{sha_key} missing from vendor/TELEMT_VERSION but {target_arch} build expects it"
+            )
+        });
+
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256={expected_sha}");
+        println!("cargo:rustc-cfg=telemt_bundled");
+        println!("cargo:rustc-check-cfg=cfg(telemt_bundled)");
+    } else {
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_VERSION={telemt_version}");
+        println!("cargo:rustc-env=AWG_EASY_TELEMT_SHA256=");
+        println!("cargo:rustc-check-cfg=cfg(telemt_bundled)");
+        println!(
+            "cargo:warning=telemt bundled mode is not available for target {target_os}-{target_arch}; \
+             awg-easy-rs will build without Telegram MTProxy support."
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1309,6 +1309,128 @@ async function showAdminTab(tab, e) {
             <button type="submit" class="btn btn--primary">Save changes</button>
           </div>
         </form>`;
+    } else if (tab === 'mtproxy') {
+      const inbound = await GET('/api/admin/mtproxy/inbound');
+      const status = await GET('/api/admin/mtproxy/status').catch(() => null);
+      const stateLabel = status ? (
+        status.state === 'running' ? `<span class="pill pill--ok">Running · pid ${status.pid} · ${Math.round(status.uptime_seconds || 0)}s</span>`
+        : status.state === 'crashed' ? `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed × ${status.restart_attempts}</span>`
+        : `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`
+      ) : '<span class="pill">unknown</span>';
+      const bundleNote = inbound.isBundled
+        ? `Bundled telemt ${esc(inbound.telemtVersion || '?')} · supervisor: ${stateLabel}`
+        : `<span class="pill pill--err">telemt not bundled in this build</span>`;
+      el.innerHTML = `
+        <div class="notice notice--info" style="margin-bottom:14px">
+          <svg><use href="#i-shield"/></svg>
+          <div>Telegram MTProxy via <a href="https://github.com/telemt/telemt" target="_blank" rel="noopener">telemt</a> — Fake-TLS / SNI-fronting (the <span class="mono">ee</span>-prefix link variant), per-user 32-hex secrets, optional traffic masking. Telegram apps don't use Reality, so this runs alongside the Xray inbound on a separate port.</div>
+        </div>
+        <div style="margin-bottom:14px">${bundleNote}</div>
+        <form onsubmit="saveMtproxyInbound(event)">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">MTProxy inbound</div>
+                <div class="card-sub">One TCP listener for Telegram's MTProto. Users live in <span class="mono">mtproxy_users_table</span> and are pushed to telemt over its loopback API on every spawn.</div>
+              </div>
+              <label class="toggle ${inbound.enabled ? 'is-on' : ''}" title="Master switch — turning this off stops telemt and tears down config.toml">
+                <input type="checkbox" id="adm-mt-enabled" ${inbound.enabled ? 'checked' : ''}>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-label">Enabled</span>
+              </label>
+            </div>
+            <div class="card-body">
+              <div class="stack">
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-mt-port" title="TCP port telemt listens on. Default 8080 to avoid colliding with Xray's 443.">Listen port</label>
+                    <input type="number" id="adm-mt-port" class="mono-input" value="${inbound.port}">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-mt-tls-domain" title="SNI / masking domain. Used for the secret=ee&lt;…&gt;&lt;hex(domain)&gt; suffix in Fake-TLS share links AND as the SNI telemt mirrors when emulating real TLS records. Pick a popular HTTPS site that's reachable from this server.">TLS-front domain</label>
+                    <input type="text" id="adm-mt-tls-domain" class="mono-input" value="${esc(inbound.tlsDomain || '')}" placeholder="e.g. www.cloudflare.com">
+                  </div>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-mt-public-host" title="Public hostname or IP to bake into tg:// share links. Empty = let telemt auto-detect from the listener IP.">Public host</label>
+                    <input type="text" id="adm-mt-public-host" class="mono-input" value="${esc(inbound.publicHost || '')}" placeholder="(auto-detect)">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-mt-public-port" title="Public port for share links. 0 = use the listen port; set only when you have a port-forward / load-balancer that maps a different external port.">Public port</label>
+                    <input type="number" id="adm-mt-public-port" class="mono-input" value="${inbound.publicPort || 0}">
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" title="Which MTProto link variants to emit. Fake-TLS is the most DPI-resistant; Secure (dd-prefix) is older and easier to fingerprint; Classic is plaintext MTProto with no obfuscation.">Modes</label>
+                  <div style="display:flex;gap:18px;flex-wrap:wrap">
+                    <label class="checkbox"><input type="checkbox" id="adm-mt-mode-tls" ${inbound.modesTls ? 'checked' : ''}><span class="checkbox-box"><svg><use href="#i-check"/></svg></span> Fake-TLS (<span class="mono">ee</span>-prefix)</label>
+                    <label class="checkbox"><input type="checkbox" id="adm-mt-mode-secure" ${inbound.modesSecure ? 'checked' : ''}><span class="checkbox-box"><svg><use href="#i-check"/></svg></span> Secure (<span class="mono">dd</span>-prefix)</label>
+                    <label class="checkbox"><input type="checkbox" id="adm-mt-mode-classic" ${inbound.modesClassic ? 'checked' : ''}><span class="checkbox-box"><svg><use href="#i-check"/></svg></span> Classic</label>
+                  </div>
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${inbound.maskEnabled ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-mt-mask" ${inbound.maskEnabled ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="When on, telemt forwards unrecognised connections to a real web server (so a probing scanner sees a normal site). Off drops them.">Mask non-MTProto traffic</label>
+                  </div>
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${inbound.useMiddleProxy ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-mt-middle" ${inbound.useMiddleProxy ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="Register with Telegram's middle-proxy network. Off = direct relay (works but no sponsored channels).">Use middle proxy</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-mt-ad-tag" title="32 hex chars from @MTProxybot. Used as the global fallback when a per-user adTag isn't set. Empty disables ad-tag fallback.">Default ad_tag (optional)</label>
+                  <input type="text" id="adm-mt-ad-tag" class="mono-input" maxlength="32" pattern="[0-9a-fA-F]{32}" value="${esc(inbound.adTag || '')}" placeholder="(none)">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-mt-extra" title="Free-form TOML appended verbatim to config.toml. Escape hatch for keys the UI doesn't model.">Additional config (TOML)</label>
+                  <textarea id="adm-mt-extra" class="mono-input" rows="3" placeholder="(empty — e.g. metrics_port = 9090)">${esc(inbound.additionalConfig || '')}</textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="save-bar">
+            <span class="changed">Saving rewrites <span class="mono">config.toml</span>; telemt picks up changes via <span class="mono">notify</span> hot-reload</span>
+            <div class="save-bar-spacer"></div>
+            <button type="button" class="btn btn--ghost" onclick="restartMtproxy()"><svg><use href="#i-refresh"/></svg> Restart telemt</button>
+            <button type="submit" class="btn btn--primary">Save changes</button>
+          </div>
+        </form>`;
+    } else if (tab === 'mtproxy-users') {
+      const data = await GET('/api/admin/mtproxy/users');
+      const users = data.users || [];
+      const liveLabel = data.telemtAvailable
+        ? '<span class="pill pill--ok">telemt API reachable</span>'
+        : '<span class="pill" title="telemt isn\'t responding on 127.0.0.1:9091. Saved users will be pushed when it next comes up.">telemt offline (DB-only)</span>';
+      const rows = users.length === 0
+        ? '<div class="empty"><h3>No MTProxy users yet</h3><p>Click <b>Add user</b> to issue a 32-hex secret. Each user gets a <span class="mono">tg://</span> share link per enabled mode.</p></div>'
+        : `<table class="table">
+            <thead><tr>
+              <th>Username</th><th>Secret</th><th>Ad-tag</th><th>State</th><th style="text-align:right">Links</th>
+            </tr></thead>
+            <tbody>${users.map(u => mtproxyUserRow(u)).join('')}</tbody>
+          </table>`;
+      el.innerHTML = `
+        <div style="margin-bottom:14px;display:flex;gap:8px;align-items:center">
+          ${liveLabel}
+          <div class="save-bar-spacer"></div>
+          <button type="button" class="btn btn--ghost btn--sm" onclick="showAdminTab('mtproxy-users')"><svg><use href="#i-refresh"/></svg> Refresh</button>
+          <button type="button" class="btn btn--primary btn--sm" onclick="addMtproxyUser()"><svg><use href="#i-plus"/></svg> Add user</button>
+        </div>
+        <div class="card">
+          <div class="card-body" style="padding:0">
+            ${rows}
+          </div>
+        </div>`;
     }
   } catch(err) {
     showToast(err.message, 'error');
@@ -1791,4 +1913,178 @@ async function restartXray() {
     showToast('Xray restarted', 'success');
     showAdminTab('xray');
   } catch(e) { showToast(e.message, 'error'); }
+}
+
+/* ============== MTPROXY (Telegram) ============== */
+
+// Render one row of the MTProxy users table. `u.links` is whatever
+// telemt returned from /v1/users/{name} — an object with `classic[]`,
+// `secure[]`, `tls[]`, `tls_domains[]`. When telemt is offline we
+// fall back to "secret only" (the operator can paste the secret into
+// a desktop tool that builds the link client-side).
+function mtproxyUserRow(u) {
+  const link = pickMtproxyShareLink(u.links);
+  const linkBtn = link
+    ? `<button class="btn btn--quiet btn--icon" title="Copy ${esc(link.kind)} share link\n${esc(link.url)}" onclick="copyMtproxyLink(this, '${escJs(link.url)}')">tg://</button>
+       <button class="btn btn--quiet btn--icon" title="QR code of the share link" onclick="showMtproxyQr('${escJs(u.username)}', '${escJs(link.url)}')">QR</button>`
+    : `<span class="pill" title="telemt is offline; reconciler will push this user when it comes back">no live link</span>`;
+  const secretShort = (u.secret || '').slice(0, 8) + '…' + (u.secret || '').slice(-6);
+  const stateBadge = u.enabled
+    ? '<span class="pill pill--ok">enabled</span>'
+    : '<span class="pill">disabled</span>';
+  return `
+    <tr data-username="${esc(u.username)}">
+      <td><b>${esc(u.username)}</b></td>
+      <td><span class="mono" title="${esc(u.secret || '')}">${esc(secretShort)}</span></td>
+      <td>${u.adTag ? `<span class="mono">${esc(u.adTag)}</span>` : '<span class="sub">— (use default)</span>'}</td>
+      <td>${stateBadge}</td>
+      <td style="text-align:right">
+        ${linkBtn}
+        <button class="btn btn--quiet btn--icon" title="Rotate this user's secret. Existing share links stop working." onclick="rotateMtproxyUser('${escJs(u.username)}')"><svg><use href="#i-refresh"/></svg></button>
+        <button class="btn btn--quiet btn--icon" title="${u.enabled ? 'Disable' : 'Enable'} this user" onclick="toggleMtproxyUser('${escJs(u.username)}', ${!u.enabled})"><svg><use href="#i-${u.enabled ? 'eye' : 'check'}"/></svg></button>
+        <button class="btn btn--quiet btn--icon" title="Delete user" onclick="deleteMtproxyUser('${escJs(u.username)}')"><svg><use href="#i-trash"/></svg></button>
+      </td>
+    </tr>`;
+}
+
+// Telemt returns links per mode and per TLS domain. We prefer the
+// Fake-TLS variant (most DPI-resistant), fall back to secure, then
+// classic. The first entry of each array is "the canonical link"
+// (telemt's resolve_link_hosts order).
+function pickMtproxyShareLink(links) {
+  if (!links) return null;
+  if (Array.isArray(links.tls) && links.tls.length) return { kind: 'Fake-TLS', url: links.tls[0] };
+  if (Array.isArray(links.secure) && links.secure.length) return { kind: 'Secure', url: links.secure[0] };
+  if (Array.isArray(links.classic) && links.classic.length) return { kind: 'Classic', url: links.classic[0] };
+  return null;
+}
+
+async function saveMtproxyInbound(e) {
+  e.preventDefault();
+  const body = {
+    enabled: $('adm-mt-enabled').checked,
+    port: parseInt($('adm-mt-port').value) || 8080,
+    publicHost: $('adm-mt-public-host').value.trim(),
+    publicPort: parseInt($('adm-mt-public-port').value) || 0,
+    tlsDomain: $('adm-mt-tls-domain').value.trim(),
+    maskEnabled: $('adm-mt-mask').checked,
+    modesClassic: $('adm-mt-mode-classic').checked,
+    modesSecure: $('adm-mt-mode-secure').checked,
+    modesTls: $('adm-mt-mode-tls').checked,
+    useMiddleProxy: $('adm-mt-middle').checked,
+    adTag: $('adm-mt-ad-tag').value.trim().toLowerCase(),
+    additionalConfig: $('adm-mt-extra').value,
+  };
+  // Server validates the same things; fail fast on the client side
+  // for the most likely mistakes so the operator gets immediate
+  // feedback without a round-trip.
+  if (!body.modesClassic && !body.modesSecure && !body.modesTls) {
+    showToast('Pick at least one mode (Fake-TLS, Secure, or Classic)', 'error');
+    return;
+  }
+  if (body.modesTls && !body.tlsDomain) {
+    showToast('Fake-TLS mode requires a TLS-front domain', 'error');
+    return;
+  }
+  if (body.adTag && !/^[0-9a-f]{32}$/i.test(body.adTag)) {
+    showToast('Ad-tag must be 32 hex characters (or empty)', 'error');
+    return;
+  }
+  try {
+    await POST('/api/admin/mtproxy/inbound', body);
+    showToast('Saved', 'success');
+    showAdminTab('mtproxy');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function restartMtproxy() {
+  try {
+    await POST('/api/admin/mtproxy/restart', {});
+    showToast('telemt restarted', 'success');
+    showAdminTab('mtproxy');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function addMtproxyUser() {
+  const name = prompt('Username for the new MTProxy user (letters, digits, "-_."):');
+  if (!name) return;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+    showToast('Username must be 1..=64 chars from [A-Za-z0-9._-]', 'error');
+    return;
+  }
+  try {
+    const created = await POST('/api/admin/mtproxy/users', { username: name });
+    showToast(`User ${name} created · secret ${created.secret}`, 'success');
+    showAdminTab('mtproxy-users');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function rotateMtproxyUser(username) {
+  if (!confirm(`Rotate the secret for ${username}? Existing tg:// links will stop working.`)) return;
+  try {
+    const out = await POST('/api/admin/mtproxy/users/' + encodeURIComponent(username) + '/rotate-secret', {});
+    showToast(`Rotated · new secret ${out.secret}`, 'success');
+    showAdminTab('mtproxy-users');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function toggleMtproxyUser(username, newEnabled) {
+  try {
+    await POST('/api/admin/mtproxy/users/' + encodeURIComponent(username), { enabled: newEnabled });
+    showToast(newEnabled ? 'User enabled' : 'User disabled', 'success');
+    showAdminTab('mtproxy-users');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteMtproxyUser(username) {
+  if (!confirm(`Delete MTProxy user ${username}? This is permanent.`)) return;
+  try {
+    await fetch('/api/admin/mtproxy/users/' + encodeURIComponent(username), {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }).then(r => { if (!r.ok) throw new Error('delete failed: ' + r.status); });
+    showToast('User deleted', 'success');
+    showAdminTab('mtproxy-users');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function copyMtproxyLink(btn, url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<svg><use href="#i-check"/></svg>';
+    setTimeout(() => { btn.innerHTML = orig; }, 1200);
+  } catch(e) { showToast('Clipboard write failed: ' + e.message, 'error'); }
+}
+
+async function showMtproxyQr(username, url) {
+  // Server-side QR generation — the SVG comes from /qrcode.svg, which
+  // hits telemt for the canonical link, falls back through the mode
+  // preference list, and rasterises with qrcode-rs. Keeps everything
+  // on-network — no third-party QR service.
+  try {
+    const resp = await fetch(
+      '/api/admin/mtproxy/users/' + encodeURIComponent(username) + '/qrcode.svg',
+      { credentials: 'same-origin' }
+    );
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(body || resp.statusText);
+    }
+    const svg = await resp.text();
+    const modal = $('modal-qr');
+    if (modal) {
+      $('modal-qr-title').textContent = 'MTProxy QR — ' + username;
+      $('modal-qr-body').innerHTML = svg
+        + '<p style="font-size:12px;opacity:.7;margin-top:10px">Paste into Telegram → Settings → Data and Storage → Proxy → Add MTProto Proxy, or scan from the same dialog.</p>'
+        + '<code style="display:block;padding:8px;margin-top:6px;background:rgba(0,0,0,.25);border-radius:6px;word-break:break-all;font-size:11px">'
+        + esc(url) + '</code>';
+      modal.classList.add('active');
+    } else {
+      const w = window.open('', '_blank', 'width=420,height=520');
+      if (w) {
+        w.document.write('<html><head><title>QR — ' + esc(username) + '</title></head><body style="margin:0;display:flex;align-items:center;justify-content:center;background:#111">' + svg + '</body></html>');
+      }
+    }
+  } catch(e) { showToast('QR fetch failed: ' + e.message, 'error'); }
 }

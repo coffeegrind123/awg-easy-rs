@@ -33,6 +33,14 @@ pub struct Config {
     /// directory. Defaults to `<wg_conf_dir>/dns`. Persist this on a
     /// docker volume so binaries don't re-extract on every restart.
     pub dns_dir: String,
+    /// Directory where the bundled telemt ELF is extracted, plus the
+    /// generated `config.toml`, telemt's PID file, and the `tlsfront`
+    /// cache it builds at first start (real TLS records fetched from the
+    /// masking domain). Defaults to `<wg_conf_dir>/mtproxy`. Same
+    /// persistence story as `dns_dir` — dropping it on every restart
+    /// works but means the tlsfront cache rebuilds and the binary
+    /// re-extracts.
+    pub mtproxy_dir: String,
 }
 
 pub fn get_env(key: &str, default: &str) -> String {
@@ -88,6 +96,8 @@ impl Config {
         let xray_binary_override = env::var("XRAY_BIN_PATH").ok().filter(|s| !s.is_empty());
         let dns_dir =
             env::var("WG_EASY_DNS_DIR").unwrap_or_else(|_| format!("{}/dns", wg_conf_dir));
+        let mtproxy_dir = env::var("WG_EASY_MTPROXY_DIR")
+            .unwrap_or_else(|_| format!("{}/mtproxy", wg_conf_dir));
 
         Config {
             port,
@@ -109,6 +119,7 @@ impl Config {
             xray_dir,
             xray_binary_override,
             dns_dir,
+            mtproxy_dir,
         }
     }
 }

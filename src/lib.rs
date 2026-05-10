@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod dns;
 pub mod firewall;
+pub mod mtproxy;
 pub mod qr;
 pub mod wg;
 pub mod xray;

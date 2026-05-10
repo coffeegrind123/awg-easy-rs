@@ -13,6 +13,7 @@ pub mod routes;
 pub mod session;
 pub mod setup;
 pub mod dns;
+pub mod mtproxy;
 pub mod xray;
 
 use axum::extract::FromRef;
@@ -213,6 +214,42 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/admin/dns/restart",
             axum::routing::post(dns::restart),
+        )
+        // Telegram MTProxy (telemt) — admin inbound + supervisor
+        .route(
+            "/admin/mtproxy/inbound",
+            axum::routing::get(mtproxy::get_inbound).post(mtproxy::update_inbound),
+        )
+        .route(
+            "/admin/mtproxy/status",
+            axum::routing::get(mtproxy::supervisor_status),
+        )
+        .route(
+            "/admin/mtproxy/stats",
+            axum::routing::get(mtproxy::stats),
+        )
+        .route(
+            "/admin/mtproxy/restart",
+            axum::routing::post(mtproxy::restart),
+        )
+        // Telegram MTProxy — admin user CRUD
+        .route(
+            "/admin/mtproxy/users",
+            axum::routing::get(mtproxy::list_users).post(mtproxy::create_user),
+        )
+        .route(
+            "/admin/mtproxy/users/:username",
+            axum::routing::get(mtproxy::get_user)
+                .post(mtproxy::update_user)
+                .delete(mtproxy::delete_user),
+        )
+        .route(
+            "/admin/mtproxy/users/:username/rotate-secret",
+            axum::routing::post(mtproxy::rotate_secret),
+        )
+        .route(
+            "/admin/mtproxy/users/:username/qrcode.svg",
+            axum::routing::get(mtproxy::user_qrcode),
         )
         // Xray clients
         .route(

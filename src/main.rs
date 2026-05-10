@@ -70,6 +70,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("DNS bundle supervisor startup failed (non-fatal): {e}");
     }
 
+    // Bring telemt (Telegram MTProxy) online if it's been enabled.
+    // Disabled by default; the supervisor's ensure_running is a no-op
+    // when the inbound row is off. Any spawn failure is non-fatal so a
+    // misconfigured tls_domain doesn't block the rest of the server.
+    #[cfg(telemt_bundled)]
+    if let Err(e) = awg_easy_rs::mtproxy::supervisor::ensure_running().await {
+        tracing::warn!("MTProxy supervisor startup failed (non-fatal): {e}");
+    }
+
     // Start background cron job (every 60 seconds)
     tokio::spawn(async move {
         loop {
@@ -136,14 +145,16 @@ async fn main() -> anyhow::Result<()> {
     };
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
-    // Post-serve cleanup. Order matters: stop Xray + DNS supervisor
-    // children first so they're reaped before we tear down firewall
-    // state, then peel back any iptables-legacy compat rules we
-    // inserted at startup.
+    // Post-serve cleanup. Order matters: stop Xray + DNS + MTProxy
+    // supervisor children first so they're reaped before we tear down
+    // firewall state, then peel back any iptables-legacy compat rules
+    // we inserted at startup.
     #[cfg(xray_bundled)]
     awg_easy_rs::xray::supervisor::shutdown_for_exit().await;
     #[cfg(dns_bundled)]
     awg_easy_rs::dns::supervisor::shutdown_for_exit().await;
+    #[cfg(telemt_bundled)]
+    awg_easy_rs::mtproxy::supervisor::shutdown_for_exit().await;
 
     if let Ok(iface) = db::get_interface() {
         firewall::remove_legacy_compat(

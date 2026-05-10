@@ -1,0 +1,16 @@
+# Pinned telemt (Telegram MTProxy) version embedded in the awg-easy-rs binary.
+# build.rs reads this file to validate that the vendored blob matches the
+# expected version, and prints the version into the binary at compile time.
+#
+# x86_64 only — same target story as the rest of the vendor tree
+# (see vendor/README.md for the rationale).
+
+TELEMT_VERSION=3.4.11
+
+# SHA-256 of the *uncompressed* telemt ELF — the runtime extractor uses
+# this to skip re-extraction when the on-disk file already matches.
+# (Distinct from the SHA of the upstream `.tar.gz`, which is what the
+# release page publishes alongside; that's recorded in vendor/README.md
+# under "Telemt provenance".)
+
+TELEMT_AMD64_SHA256=9b003bc0ae0cd92e38635d5542a2fbfc14b6e5015904bcbf495a7462b10bbbbd

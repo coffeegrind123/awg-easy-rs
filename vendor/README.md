@@ -5,9 +5,9 @@
 **x86_64-linux only.** arm64 / aarch64 was dropped intentionally — the
 DNS bundle's pluggable transports have no upstream pre-built static
 arm64 ELFs and no viable cross-build path that's worth maintaining.
-`build.rs` only emits `xray_bundled` and `dns_bundled` cfgs for
-`("linux", "x86_64")`; other targets compile cleanly but without the
-bundled binaries.
+`build.rs` only emits `xray_bundled`, `dns_bundled`, and `telemt_bundled`
+cfgs for `("linux", "x86_64")`; other targets compile cleanly but
+without the bundled binaries.
 
 ## `xray-linux-amd64.gz`
 
@@ -184,3 +184,53 @@ The bundle is opt-in at runtime. Even with `cfg(dns_bundled)` set:
 
 All five are permissive licenses that allow redistribution of the
 unmodified binary as part of awg-easy-rs.
+
+---
+
+## `telemt-linux-amd64.gz` (`telemt_bundled` cfg)
+
+Pinned [telemt/telemt](https://github.com/telemt/telemt) **v3.4.11** ELF,
+gzip-compressed (level 9). telemt is a Rust + Tokio implementation of
+Telegram's MTProto proxy with full Fake-TLS / SNI fronting (the
+`ee`-prefix link variant), per-user secrets, replay protection, and
+optional masking. Embedded the same way as Xray — `include_bytes!` at
+build time, runtime extraction with SHA verification.
+
+### Provenance
+
+Downloaded from the [3.4.11 release](https://github.com/telemt/telemt/releases/tag/3.4.11)
+on 2026-05-10:
+
+- `telemt-x86_64-linux-musl.tar.gz` — SHA256 `513e1f951bc88320dffe40c1aec8eefe83f6d2c82c152cbf9e35a5a57a757ede` (verified against the upstream `telemt-x86_64-linux-musl.tar.gz.sha256`)
+
+The single `telemt` ELF inside is `static-pie linked` (per `file(1)`), so
+it runs unchanged on glibc, musl, or any other libc x86_64 host. It was
+extracted from the tarball and re-compressed with `gzip -9`.
+Decompressed-ELF SHA-256 (used by the runtime extractor to detect
+cache-staleness): `9b003bc0ae0cd92e38635d5542a2fbfc14b6e5015904bcbf495a7462b10bbbbd` — recorded in `TELEMT_VERSION`.
+
+### Licensing
+
+telemt is distributed under the **Telemt Public License 3** (TPL 3), an
+Apache-License-2.0–derived permissive license. The full text is mirrored
+at [`vendor/LICENSES/TELEMT-LICENSE.md`](LICENSES/TELEMT-LICENSE.md);
+upstream copy at <https://github.com/telemt/telemt/blob/main/LICENSE>.
+
+Redistribution of the unmodified binary as part of awg-easy-rs is
+permitted under the TPL 3, provided that all copyright notices, license
+terms, and conditions in the License are preserved — `vendor/LICENSES/`
+is exactly that preservation.
+
+### Updating
+
+Bumping telemt is a three-step process — `vendor/update.sh telemt
+<version>` automates it:
+
+1. Download the new `telemt-x86_64-linux-musl.tar.gz` and verify the
+   `.sha256` companion against upstream.
+2. Extract the `telemt` ELF; re-gzip with `gzip -9`.
+3. Update `TELEMT_VERSION` (version + uncompressed-ELF SHA-256) and the
+   tarball SHA recorded above.
+
+The build will refuse to start if `TELEMT_VERSION` and the vendored blob
+disagree.
