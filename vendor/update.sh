@@ -446,7 +446,7 @@ set -e
 echo '=== apk packages ==='
 apk add --no-cache build-base wget openssl-dev openssl-libs-static \
     libevent-dev libevent-static zlib-dev zlib-static linux-headers \
-    pkgconfig
+    pkgconfig file
 apk info -v openssl-libs-static libevent-static zlib-static build-base
 echo '=== static archives on disk ==='
 # tor's --enable-static-{zlib,libevent,openssl} require a matching
@@ -520,12 +520,12 @@ update_go_pt() {
 
     log "building $blob_name $git_tag from source (Go, static, CGO_ENABLED=0)"
     # /src and /out aren't standard paths in golang:*-alpine — create
-    # them before cd'ing in. (Latent bug: with `set -e`, the previous
-    # `cd /src` aborted the script silently — only surfaced once CI
-    # actually ran this branch on 2026-05-10.)
+    # them before cd'ing in. Also pull in `file`, which the slim
+    # alpine base doesn't ship: needed for the post-build ELF check.
+    # (Both latent until CI actually exercised this path on 2026-05-10.)
     local script="
 set -e
-apk add --no-cache git >/dev/null 2>&1
+apk add --no-cache git file >/dev/null 2>&1
 mkdir -p /src /out
 cd /src
 git clone --depth 1 --branch '${git_tag}' '${git_url}' src 2>&1 | tail -3
@@ -535,7 +535,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     -o /out/${out_binary} ${build_subpath}
 file /out/${out_binary} | grep -q 'ELF .* executable' || {
     echo '${blob_name} build did not produce an ELF executable:'
-    file /out/${out_binary}
+    file /out/${out_binary} 2>&1 || ls -la /out/${out_binary}
     exit 1
 }
 strip /out/${out_binary}
