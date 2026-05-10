@@ -535,10 +535,15 @@ update_go_pt() {
     # (Both latent until CI actually exercised this path on 2026-05-10.)
     local script="
 set -e
-# golang:*-alpine is slim — `git` for fetch, `file` for the
-# post-build ELF gate, `binutils` for `strip`. Adding `binutils`
-# also pulls in the standard ar/ld toolchain that some Go cgo
-# fallbacks expect even when CGO_ENABLED=0 is set.
+# golang:*-alpine is slim. We pull in three packages: git (for the
+# clone step), file (for the post-build ELF gate), and binutils
+# (which provides strip + ar + ld for any Go cgo fallback path).
+# (Backticks elided from this comment on purpose — the script is
+#  inside a bash double-quoted heredoc-style string, so a backtick
+#  would trigger command substitution at variable-assign time.
+#  Got bitten by exactly that on 2026-05-10: 'binutils' in
+#  backticks ran as a shell command on the host before docker
+#  even started.)
 apk add --no-cache git file binutils >/dev/null 2>&1
 mkdir -p /src /out
 cd /src
