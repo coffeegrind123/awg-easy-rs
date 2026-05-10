@@ -162,14 +162,24 @@ require_docker() {
     docker info >/dev/null 2>&1 || die "docker daemon not reachable"
 }
 
-# Verify the ELF is ACTUALLY static (no shared lib deps, no dynamic
-# interpreter). Catches "we built with musl-gcc but forgot crt-static"
-# regressions before they make it into the repo.
+# Verify the ELF is ACTUALLY a static ELF executable. Catches:
+#   - dynamic linking ("we built with musl-gcc but forgot crt-static")
+#   - dynamic interpreter declared ("would break on hosts without that
+#     loader path")
+#   - the configure/make produced something that isn't an ELF at all
+#     ("data", a libtool wrapper script, an empty file). This last
+#     case happened in CI when an Alpine package vintage broke tor's
+#     static-link path; the build "succeeded" but produced garbage,
+#     was SHA-pinned, and shipped to no end.
 verify_static() {
     local path="$1" name="$2"
     local file_out
     file_out="$(file "$path")"
     log "  file: $file_out"
+    if ! echo "$file_out" | grep -q "ELF "; then
+        die "$name: $path is not an ELF binary (file says: $file_out) — \
+build produced garbage or a wrapper script"
+    fi
     if echo "$file_out" | grep -q "dynamically linked"; then
         die "$name: ELF is dynamically linked — would break on non-musl hosts"
     fi
@@ -178,8 +188,8 @@ verify_static() {
 without that loader path"
     fi
     if ! echo "$file_out" | grep -qE "statically linked|static-pie"; then
-        warn "$name: file output didn't include 'statically linked' or \
-'static-pie' — manual review recommended"
+        die "$name: file output didn't include 'statically linked' or \
+'static-pie' — refusing to ship a maybe-static binary (got: $file_out)"
     fi
 }
 
@@ -393,9 +403,19 @@ update_tor() {
     require_docker
     log "building tor $version from source in Alpine Docker (~10 min)"
 
-    # Fully static-PIE build via Alpine's apk packages for the static
-    # variants of openssl + libevent + zlib. These are the same packages
-    # we used for the original curation in this repo.
+    # Pin Alpine to 3.20 (current LTS as of 2026-05). The previous
+    # `alpine` (= alpine:latest) tag broke under us when a newer
+    # openssl-libs-static version stopped composing with tor's
+    # `--enable-static-openssl` config — produced an output file
+    # `file` reported as `data` (not ELF) that we then SHA-pinned
+    # and shipped. Pinning the Alpine version makes apk pick up a
+    # known-good toolchain across machines + CI runs. Bump
+    # explicitly when revisiting.
+    #
+    # Same fully-static-PIE build via apk static-variant packages.
+    # If --version fails or `file` says we didn't produce a valid
+    # static ELF, the surrounding script aborts (verify_static is
+    # strict about that since the CI failure on 2026-05-10).
     local script="
 set -e
 apk add --no-cache build-base wget openssl-dev openssl-libs-static \
@@ -415,16 +435,27 @@ cd tor-${version}
     --disable-systemd --disable-lzma --disable-zstd \
     >/tmp/configure.log 2>&1
 make -j\$(nproc) >/tmp/make.log 2>&1
+# Refuse to ship if the linker silently produced a non-ELF — make
+# may exit 0 on a partial/odd link path.
+file src/app/tor | grep -q 'ELF .* executable' || {
+    echo 'tor build did not produce an ELF executable:'
+    file src/app/tor
+    exit 1
+}
+src/app/tor --version >/dev/null || {
+    echo 'tor --version failed inside the build container'
+    exit 1
+}
 strip src/app/tor
 "
-    docker_build_to_file alpine "awg-tor-build-$$" "$script" \
+    docker_build_to_file alpine:3.20 "awg-tor-build-$$" "$script" \
         "/tmp/tor-${version}/src/app/tor" "$WORK_DIR/tor"
 
     verify_static "$WORK_DIR/tor" "tor"
 
     log "smoke-test"
     "$WORK_DIR/tor" --version >/dev/null 2>&1 \
-        || warn "tor --version returned non-zero"
+        || die "tor --version returned non-zero — refusing to ship a non-functional binary"
 
     local sha
     sha="$(package_blob "$WORK_DIR/tor" "tor")"
@@ -441,15 +472,25 @@ update_go_pt() {
     require_docker
 
     log "building $blob_name $git_tag from source (Go, static, CGO_ENABLED=0)"
+    # /src and /out aren't standard paths in golang:*-alpine — create
+    # them before cd'ing in. (Latent bug: with `set -e`, the previous
+    # `cd /src` aborted the script silently — only surfaced once CI
+    # actually ran this branch on 2026-05-10.)
     local script="
 set -e
 apk add --no-cache git >/dev/null 2>&1
+mkdir -p /src /out
 cd /src
 git clone --depth 1 --branch '${git_tag}' '${git_url}' src 2>&1 | tail -3
 cd src
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w -extldflags=-static' \
     -o /out/${out_binary} ${build_subpath}
+file /out/${out_binary} | grep -q 'ELF .* executable' || {
+    echo '${blob_name} build did not produce an ELF executable:'
+    file /out/${out_binary}
+    exit 1
+}
 strip /out/${out_binary}
 "
     docker_build_to_file golang:1.24-alpine "awg-go-build-$$" "$script" \
