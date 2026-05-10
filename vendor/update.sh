@@ -416,25 +416,36 @@ update_tor() {
     # If --version fails or `file` says we didn't produce a valid
     # static ELF, the surrounding script aborts (verify_static is
     # strict about that since the CI failure on 2026-05-10).
+    # NOTE on diagnostics: configure + make output goes straight to the
+    # container's stdout/stderr (no redirection). When something breaks
+    # we get the actual compiler error in `docker logs`, which the
+    # docker_build_to_file failure path already prints. Without this,
+    # alpine package drift between local and CI runners (e.g. openssl 3
+    # API changes that tor's autoconf can't accommodate) shows up as
+    # "container exited" with no clue why.
     local script="
 set -e
+echo '=== apk packages ==='
 apk add --no-cache build-base wget openssl-dev openssl-libs-static \
-    libevent-dev libevent-static zlib-dev zlib-static linux-headers \
-    >/dev/null 2>&1
+    libevent-dev libevent-static zlib-dev zlib-static linux-headers
+apk info -v openssl-libs-static libevent-static zlib-static build-base
 cd /tmp
+echo '=== fetching tor ${version} ==='
 wget -q https://dist.torproject.org/tor-${version}.tar.gz
 wget -q https://dist.torproject.org/tor-${version}.tar.gz.sha256sum
 sha256sum -c tor-${version}.tar.gz.sha256sum
 tar xzf tor-${version}.tar.gz
 cd tor-${version}
+echo '=== ./configure ==='
 ./configure --enable-static-tor \
     --enable-static-openssl --with-openssl-dir=/usr/lib \
     --enable-static-libevent --with-libevent-dir=/usr/lib \
     --enable-static-zlib --with-zlib-dir=/usr/lib \
     --disable-asciidoc --disable-html-manual --disable-manpage \
-    --disable-systemd --disable-lzma --disable-zstd \
-    >/tmp/configure.log 2>&1
-make -j\$(nproc) >/tmp/make.log 2>&1
+    --disable-systemd --disable-lzma --disable-zstd
+echo '=== make ==='
+make -j\$(nproc)
+echo '=== verify ==='
 # Refuse to ship if the linker silently produced a non-ELF — make
 # may exit 0 on a partial/odd link path.
 file src/app/tor | grep -q 'ELF .* executable' || {
