@@ -272,14 +272,26 @@ docker_build_to_file() {
 
     log "starting build container ($image)"
     docker pull "$image" >/dev/null 2>&1 || true
+    # `&&` not `;` — if the build script fails, the container should
+    # exit so the polling loop's "container exited before producing
+    # X" path fires. With `;`, `sleep infinity` runs on every exit
+    # status and the container stays alive even after a failed
+    # build, then the polling either hangs forever or sees a
+    # half-written placeholder file the build emitted before
+    # erroring out.
     docker run -d --name "$container_name" "$image" \
-        sh -c "$build_script ; sleep infinity" >/dev/null
+        sh -c "$build_script && sleep infinity" >/dev/null
     DOCKER_CONTAINERS+=("$container_name")
 
-    # Poll until the build artifact appears or the container exits.
+    # Poll until the build artifact appears (and is non-empty) or the
+    # container exits. `test -s` instead of `test -f` because tor's
+    # Makefile creates `src/app/tor` as a 0-byte placeholder before
+    # the actual final link runs; with -f we'd race that placeholder
+    # and copy out an empty file, which then fails verify_static
+    # downstream with a confusing "file says: empty" error.
     log "waiting for build to complete (this can take 10+ minutes for tor)"
     local elapsed=0
-    while ! docker exec "$container_name" test -f "$container_path" 2>/dev/null; do
+    while ! docker exec "$container_name" test -s "$container_path" 2>/dev/null; do
         if ! docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null \
                 | grep -q true; then
             warn "container exited before producing $container_path"
