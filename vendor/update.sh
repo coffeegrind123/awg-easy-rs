@@ -272,15 +272,20 @@ docker_build_to_file() {
 
     log "starting build container ($image)"
     docker pull "$image" >/dev/null 2>&1 || true
-    # `&&` not `;` — if the build script fails, the container should
-    # exit so the polling loop's "container exited before producing
-    # X" path fires. With `;`, `sleep infinity` runs on every exit
-    # status and the container stays alive even after a failed
-    # build, then the polling either hangs forever or sees a
-    # half-written placeholder file the build emitted before
-    # erroring out.
+    # The build script itself appends `exec sleep infinity` at its
+    # very end (callers responsibility — see update_tor /
+    # update_go_pt). That keeps the container alive after a
+    # successful build for the docker-cp step. On failure, set -e
+    # aborts before the exec runs, so the shell exits non-zero
+    # and the container terminates — that's what the polling
+    # loop's "container exited before producing X" path detects.
+    #
+    # We previously tried `sh -c "$build_script && sleep infinity"`
+    # for this. Doesn't work: $build_script ends with a newline,
+    # so the result is a script with `&&` at the start of a new
+    # line, which busybox sh rejects with "unexpected &&".
     docker run -d --name "$container_name" "$image" \
-        sh -c "$build_script && sleep infinity" >/dev/null
+        sh -c "$build_script" >/dev/null
     DOCKER_CONTAINERS+=("$container_name")
 
     # Poll until the build artifact appears (and is non-empty) or the
@@ -494,6 +499,11 @@ src/app/tor --version >/dev/null || {
     exit 1
 }
 strip src/app/tor
+# Keep the container alive for docker-cp. set -e above means any
+# prior failure already exited; reaching this line is the success
+# path. exec replaces sh so the container's PID 1 becomes sleep —
+# clean shutdown on docker rm -f.
+exec sleep infinity
 "
     docker_build_to_file alpine:3.20 "awg-tor-build-$$" "$script" \
         "/tmp/tor-${version}/src/app/tor" "$WORK_DIR/tor"
@@ -543,6 +553,8 @@ file /out/${out_binary} | grep -q 'ELF .* executable' || {
     exit 1
 }
 strip /out/${out_binary}
+# Keep alive for docker-cp; see update_tor for the rationale.
+exec sleep infinity
 "
     docker_build_to_file golang:1.24-alpine "awg-go-build-$$" "$script" \
         "/out/${out_binary}" "$WORK_DIR/${out_binary}"
