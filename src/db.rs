@@ -845,6 +845,34 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
             "DB migration: replaced legacy iptables hooks with native nftables defaults"
         );
     }
+
+    // Backfill singleton rows for tables that may have been added in a
+    // later release than this DB was first seeded against. INSERT OR
+    // IGNORE makes this safe to run on every boot — the row only lands
+    // when it's missing. The original `seed_if_empty` path early-exits
+    // when general_table is populated, which used to mean an upgraded
+    // DB never saw new singleton rows (e.g. xray_inbound).
+    ensure_singleton_rows(conn)?;
+    Ok(())
+}
+
+/// Idempotently ensure every singleton table has its default row.
+/// Pulled out of `seed_if_empty` so the migration step can call it
+/// even on already-populated DBs.
+fn ensure_singleton_rows(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO xray_inbound_table \
+         (id, port, dest, server_names, fingerprint_default, enabled) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            "xray0",
+            443,
+            "www.microsoft.com:443",
+            r#"["www.microsoft.com"]"#,
+            "chrome",
+            0,
+        ],
+    )?;
     Ok(())
 }
 
