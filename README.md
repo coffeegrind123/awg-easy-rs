@@ -11,7 +11,7 @@ Both modes share the same admin UI, user accounts, session/auth, and SQLite DB.
 
 - **~18 MB stripped release binary** (was ~3 MB before Xray; bundled Xray-core ELF accounts for ~13 MB of that).
 - **252 tests** (DB, auth, security, API, AmneziaWG kernel-parity, Xray Reality e2e).
-- **Native nftables firewall** — single `inet awg-easy-rs` table with atomic transactions; no iptables.
+- **Native nftables firewall** — single `inet awg-easy-rs` table with atomic transactions. Transparent compat shim for hosts still on `iptables-legacy`: detected at startup, three FORWARD/INPUT accept rules mirrored into the legacy backend, removed on graceful shutdown.
 
 ---
 

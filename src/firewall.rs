@@ -345,6 +345,190 @@ fn parse_handle(line: &str) -> Option<u64> {
         .and_then(|s| s.parse().ok())
 }
 
+// ---------------------------------------------------------------------------
+// iptables-legacy compatibility
+// ---------------------------------------------------------------------------
+//
+// Modern hosts run `iptables-nft`, which writes to the same `nf_tables`
+// kernel backend our `nft` commands use. On those hosts our
+// `inet awg-easy-rs forward accept` and the operator's `ip filter forward`
+// rules (also nf_tables) compose cleanly: same backend, single hook chain
+// per priority, verdicts merge predictably.
+//
+// Older hosts run `iptables-legacy`, which writes to the parallel
+// `xt_tables` kernel backend. xt_tables and nf_tables are separate kernel
+// modules with separate hook chains; the kernel runs both at each
+// netfilter hook and the packet is forwarded only if BOTH chains accept.
+// A FORWARD-DROP policy in xt_tables drops the packet even though our
+// nf_tables chain said accept.
+//
+// On startup we detect whether xt_tables is loaded AND a legacy CLI is
+// available, and if so we mirror the three "let AWG traffic through"
+// rules into the legacy backend so they're seen by both subsystems.
+// Removed on graceful shutdown via the SIGTERM handler in main.rs.
+//
+// Detection signal: `/proc/net/ip_tables_names` exists if and only if
+// the `ip_tables` kernel module is loaded. iptables-nft hosts don't
+// load `ip_tables` and don't create that file. (Same for ip6_tables.)
+
+fn ip_tables_loaded() -> bool {
+    std::path::Path::new("/proc/net/ip_tables_names").exists()
+}
+
+fn ip6_tables_loaded() -> bool {
+    std::path::Path::new("/proc/net/ip6_tables_names").exists()
+}
+
+/// Resolve the binary that speaks the xt_tables backend. Returns the
+/// argv-0 we should call. Tries `iptables-legacy` first (explicit name
+/// on Debian/Ubuntu/Fedora when both backends are co-installed), then
+/// falls back to plain `iptables` if its `--version` reports `(legacy)`.
+fn legacy_iptables_bin() -> Option<&'static str> {
+    if Command::new("iptables-legacy")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some("iptables-legacy");
+    }
+    let out = Command::new("iptables").arg("--version").output().ok()?;
+    if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("(legacy)") {
+        return Some("iptables");
+    }
+    None
+}
+
+fn legacy_ip6tables_bin() -> Option<&'static str> {
+    if Command::new("ip6tables-legacy")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some("ip6tables-legacy");
+    }
+    let out = Command::new("ip6tables").arg("--version").output().ok()?;
+    if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("(legacy)") {
+        return Some("ip6tables");
+    }
+    None
+}
+
+/// Idempotent insert. `-C` first to test, `-I` only if missing, so
+/// repeated calls don't pile up duplicates.
+fn ensure_iptables_rule(bin: &str, args: &[&str]) -> Result<()> {
+    let mut check: Vec<&str> = vec!["-C"];
+    check.extend_from_slice(args);
+    let exists = Command::new(bin)
+        .args(&check)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let mut insert: Vec<&str> = vec!["-I"];
+    insert.extend_from_slice(args);
+    let out = Command::new(bin).args(&insert).output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "{bin} {:?}: {}",
+            insert,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn delete_iptables_rule(bin: &str, args: &[&str]) {
+    let mut delete: Vec<&str> = vec!["-D"];
+    delete.extend_from_slice(args);
+    // Best-effort: a missing rule (already removed, never inserted) is
+    // not worth a noisy warning during shutdown.
+    let _ = Command::new(bin).args(&delete).output();
+}
+
+/// The three rules we mirror into the legacy backend. Returned as
+/// argv slices so the caller can pass them straight to `ensure_iptables_rule`
+/// / `delete_iptables_rule` without rebuilding.
+fn legacy_compat_rule_set<'a>(iface: &'a str, port: &'a str) -> [Vec<&'a str>; 3] {
+    [
+        vec!["FORWARD", "-i", iface, "-j", "ACCEPT"],
+        vec!["FORWARD", "-o", iface, "-j", "ACCEPT"],
+        vec!["INPUT", "-p", "udp", "--dport", port, "-j", "ACCEPT"],
+    ]
+}
+
+/// Idempotently mirror our forward/input accept rules into iptables-legacy
+/// so they're seen by both kernel subsystems. No-op when xt_tables isn't
+/// loaded or no legacy CLI is available — that covers every iptables-nft
+/// host (the default on every modern distro).
+pub fn ensure_legacy_compat(iface: &str, port: i64, enable_ipv6: bool) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    let port_str = port.to_string();
+    let iface = sanitize_iface(iface);
+
+    if ip_tables_loaded() {
+        if let Some(bin) = legacy_iptables_bin() {
+            for args in legacy_compat_rule_set(&iface, &port_str) {
+                ensure_iptables_rule(bin, &args)?;
+            }
+            tracing::info!(
+                bin,
+                iface = %iface,
+                port,
+                "iptables-legacy compat: ensured FORWARD/INPUT accept rules"
+            );
+        }
+    }
+    if enable_ipv6 && ip6_tables_loaded() {
+        if let Some(bin) = legacy_ip6tables_bin() {
+            for args in legacy_compat_rule_set(&iface, &port_str) {
+                ensure_iptables_rule(bin, &args)?;
+            }
+            tracing::info!(
+                bin,
+                iface = %iface,
+                port,
+                "ip6tables-legacy compat: ensured FORWARD/INPUT accept rules"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort cleanup. Called from the SIGTERM handler so a graceful
+/// shutdown doesn't leave orphaned `-i awg0 -j ACCEPT` rules in
+/// iptables-legacy after the interface is gone. Errors swallowed —
+/// the process is on its way out anyway.
+pub fn remove_legacy_compat(iface: &str, port: i64, enable_ipv6: bool) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let port_str = port.to_string();
+    let iface = sanitize_iface(iface);
+
+    if ip_tables_loaded() {
+        if let Some(bin) = legacy_iptables_bin() {
+            for args in legacy_compat_rule_set(&iface, &port_str) {
+                delete_iptables_rule(bin, &args);
+            }
+            tracing::info!(bin, "iptables-legacy compat: removed accept rules");
+        }
+    }
+    if enable_ipv6 && ip6_tables_loaded() {
+        if let Some(bin) = legacy_ip6tables_bin() {
+            for args in legacy_compat_rule_set(&iface, &port_str) {
+                delete_iptables_rule(bin, &args);
+            }
+            tracing::info!(bin, "ip6tables-legacy compat: removed accept rules");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +617,40 @@ mod tests {
             Some(42)
         );
         assert_eq!(parse_handle("no handle here"), None);
+    }
+
+    #[test]
+    fn legacy_compat_rule_set_covers_forward_and_input() {
+        let rules = legacy_compat_rule_set("awg0", "51820");
+        // Three rules: FORWARD-in, FORWARD-out, INPUT.
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            rules[0],
+            vec!["FORWARD", "-i", "awg0", "-j", "ACCEPT"]
+        );
+        assert_eq!(
+            rules[1],
+            vec!["FORWARD", "-o", "awg0", "-j", "ACCEPT"]
+        );
+        assert_eq!(
+            rules[2],
+            vec!["INPUT", "-p", "udp", "--dport", "51820", "-j", "ACCEPT"]
+        );
+    }
+
+    #[test]
+    fn legacy_compat_no_op_when_modules_not_loaded() {
+        // /proc/net/ip_tables_names doesn't exist on this dev box (we
+        // sit behind an iptables-nft kernel). ensure_legacy_compat must
+        // silently no-op without spawning any legacy CLI, otherwise it
+        // would fail the build pipeline on systems lacking the binary.
+        if ip_tables_loaded() || ip6_tables_loaded() {
+            return; // skip on hosts where xt_tables IS loaded
+        }
+        // Should be Ok and a no-op.
+        ensure_legacy_compat("awg0", 51820, true).unwrap();
+        // remove is fire-and-forget but still must not panic.
+        remove_legacy_compat("awg0", 51820, true);
     }
 
     /// End-to-end: feed a representative transaction through `nft -c -f -`

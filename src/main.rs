@@ -1,4 +1,4 @@
-use awg_easy_rs::{api, auth, config, db, wg};
+use awg_easy_rs::{api, auth, config, db, firewall, wg};
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -36,6 +36,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Web UI will still be available. Fix AmneziaWG and use Restart from admin panel.");
     } else {
         tracing::info!("AmneziaWG started");
+    }
+
+    // iptables-legacy compat: on hosts running the xt_tables backend
+    // (typically RHEL/CentOS 7 vintage), our nft `accept` is invisible
+    // to the legacy FORWARD chain. Mirror the three "let AWG through"
+    // rules into iptables-legacy so the verdicts compose. Idempotent;
+    // no-op on every modern (iptables-nft) host.
+    if let Ok(iface) = db::get_interface() {
+        if let Err(e) = firewall::ensure_legacy_compat(
+            &iface.name,
+            iface.port,
+            !config::CONFIG.disable_ipv6,
+        ) {
+            tracing::warn!("iptables-legacy compat startup failed (non-fatal): {e}");
+        }
     }
 
     // Bring Browsing-mode Xray online if it's been enabled. Non-fatal:
@@ -80,7 +95,52 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("awg-easy-rs starting on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    // Graceful shutdown future: SIGTERM (docker compose down, systemd stop)
+    // or SIGINT (Ctrl-C in foreground) flips the future. axum stops
+    // accepting new connections and drains in-flight ones.
+    let shutdown = async {
+        let mut sigterm = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = ?e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+                unreachable!();
+            }
+        };
+        let mut sigint = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::interrupt(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = ?e, "failed to install SIGINT handler");
+                std::future::pending::<()>().await;
+                unreachable!();
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("SIGTERM received; shutting down"),
+            _ = sigint.recv()  => tracing::info!("SIGINT received; shutting down"),
+        }
+    };
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+
+    // Post-serve cleanup. Order matters: stop Xray first so its child
+    // process is reaped before we tear down firewall state, then peel
+    // back any iptables-legacy compat rules we inserted at startup.
+    #[cfg(xray_bundled)]
+    awg_easy_rs::xray::supervisor::shutdown_for_exit().await;
+
+    if let Ok(iface) = db::get_interface() {
+        firewall::remove_legacy_compat(
+            &iface.name,
+            iface.port,
+            !config::CONFIG.disable_ipv6,
+        );
+    }
+    tracing::info!("awg-easy-rs exited cleanly");
     Ok(())
 }
 
