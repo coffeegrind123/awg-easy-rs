@@ -283,8 +283,14 @@ docker_build_to_file() {
         if ! docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null \
                 | grep -q true; then
             warn "container exited before producing $container_path"
-            log "build container logs (last 40 lines):"
-            docker logs --tail 40 "$container_name" >&2 || true
+            # Dump the FULL container log on failure. Earlier we used
+            # --tail 40, but autoconf's "configure: error: …" message
+            # often comes mid-log followed by a hundred lines of make
+            # noise — by the time the container exits, the actionable
+            # error has scrolled off. Full logs go to stderr; CI keeps
+            # the whole job log anyway, so size isn't a concern.
+            log "build container logs (full):"
+            docker logs "$container_name" >&2 || true
             die "build failed inside $image"
         fi
         sleep 5
@@ -431,12 +437,22 @@ apk add --no-cache build-base wget openssl-dev openssl-libs-static \
     pkgconfig
 apk info -v openssl-libs-static libevent-static zlib-static build-base
 echo '=== static archives on disk ==='
-# Prior CI failure: --with-zlib-dir=/usr/lib was hardcoded but
-# alpine:3.20's zlib-static drops libz.a somewhere else. Print
-# the actual locations so autoconf's default search succeeds and
-# any future re-break has actionable diagnostics.
-find / -name 'libz.a' -o -name 'libssl.a' -o -name 'libcrypto.a' \
-    -o -name 'libevent.a' 2>/dev/null
+# tor's --enable-static-{zlib,libevent,openssl} require a matching
+# --with-{zlib,libevent,openssl}-dir=DIR pointing at the directory
+# containing lib<x>.a. Alpine versions move static archives around
+# (the original /usr/lib worked locally but breaks on alpine:3.20),
+# so derive the directory from apk's own file list rather than
+# hardcoding it. Falls back to /usr/lib if the package query fails.
+ZLIB_A=\$(apk info -L zlib-static    | grep -m1 '^.*libz\\.a\$'    | sed 's:^:/:;s:/libz\\.a\$::')
+EVENT_A=\$(apk info -L libevent-static | grep -m1 '^.*libevent\\.a\$' | sed 's:^:/:;s:/libevent\\.a\$::')
+SSL_A=\$(apk info -L openssl-libs-static | grep -m1 '^.*libssl\\.a\$'  | sed 's:^:/:;s:/libssl\\.a\$::')
+ZLIB_DIR=\${ZLIB_A:-/usr/lib}
+EVENT_DIR=\${EVENT_A:-/usr/lib}
+SSL_DIR=\${SSL_A:-/usr/lib}
+echo \"  libz.a    in \$ZLIB_DIR\"
+echo \"  libevent.a in \$EVENT_DIR\"
+echo \"  libssl.a   in \$SSL_DIR\"
+ls -la \"\$ZLIB_DIR/libz.a\" \"\$EVENT_DIR/libevent.a\" \"\$SSL_DIR/libssl.a\" \"\$SSL_DIR/libcrypto.a\"
 cd /tmp
 echo '=== fetching tor ${version} ==='
 wget -q https://dist.torproject.org/tor-${version}.tar.gz
@@ -445,16 +461,10 @@ sha256sum -c tor-${version}.tar.gz.sha256sum
 tar xzf tor-${version}.tar.gz
 cd tor-${version}
 echo '=== ./configure ==='
-# Drop the hardcoded --with-*-dir=/usr/lib args. They were
-# forcing autoconf to use literal /usr/lib/lib<x>.a paths in the
-# generated Makefiles, which fails when alpine renames or moves
-# package contents. Without them, configure uses pkg-config /
-# its own multi-path search and finds the static archives in
-# whatever standard location they live.
 ./configure --enable-static-tor \
-    --enable-static-openssl \
-    --enable-static-libevent \
-    --enable-static-zlib \
+    --enable-static-openssl --with-openssl-dir=\$SSL_DIR \
+    --enable-static-libevent --with-libevent-dir=\$EVENT_DIR \
+    --enable-static-zlib --with-zlib-dir=\$ZLIB_DIR \
     --disable-asciidoc --disable-html-manual --disable-manpage \
     --disable-systemd --disable-lzma --disable-zstd
 echo '=== make ==='
