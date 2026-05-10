@@ -988,16 +988,24 @@ CREATE TABLE IF NOT EXISTS xray_clients_table (
 const CREATE_DNS_BUNDLE: &str = r#"
 CREATE TABLE IF NOT EXISTS dns_bundle_table (
     id                   TEXT PRIMARY KEY,
-    enabled              INTEGER NOT NULL DEFAULT 0,
+    -- Master switch — ON by default. Fresh deployments get
+    -- dnscrypt-proxy running on the listen port immediately, with
+    -- DNSSEC + no-log requirements enforced; the WireGuard side's
+    -- generated configs point peers at it. Operators who don't want
+    -- a bundled resolver flip this off in the admin UI; existing
+    -- DBs that already have an explicit setting keep it (column
+    -- defaults only apply on INSERT, not on subsequent boots).
+    enabled              INTEGER NOT NULL DEFAULT 1,
     listen_port          INTEGER NOT NULL DEFAULT 5353,
     upstream_resolvers   TEXT NOT NULL DEFAULT '[]',
     require_dnssec       INTEGER NOT NULL DEFAULT 1,
     require_nolog        INTEGER NOT NULL DEFAULT 1,
     require_nofilter     INTEGER NOT NULL DEFAULT 0,
-    -- Tor: opt-in, off by default. Even with the bundle enabled the
-    -- supervisor refuses to spawn tor unless tor_enabled=1 (see
-    -- feedback_dns_bundle.md memory). When on, dnscrypt-proxy's
-    -- proxy = 'socks5://127.0.0.1:<tor_socks_port>' line is enabled.
+    -- Tor: opt-in, off by default — even when the master switch is
+    -- on. Tor adds latency, exit-node trust assumptions, and
+    -- BridgeDB network calls — operators who want it flip this
+    -- explicitly in the admin UI. (See feedback_dns_bundle.md
+    -- memory: tor stays off independent of dnscrypt-proxy.)
     tor_enabled          INTEGER NOT NULL DEFAULT 0,
     tor_socks_port       INTEGER NOT NULL DEFAULT 9053,
     tor_exit_nodes       TEXT NOT NULL DEFAULT '',
