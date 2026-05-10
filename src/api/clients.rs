@@ -553,8 +553,25 @@ pub async fn update_client(
     // The generic UPDATE helper takes string values, so only the
     // Some(Some(_)) case routes through it. The null branch goes through a
     // dedicated helper that emits a NULL literal.
+    //
+    // Refuse the explicit on|off setting when the host isn't running
+    // the kernel module — userspace amneziawg-go chokes on a peer
+    // line containing `AdvancedSecurity = on|off` and the resulting
+    // handshake silently fails. Operators see this as a clean 4xx
+    // here instead of a peer-side "no handshake" debug session
+    // hours later. Only `Some(Some(_))` triggers the gate; clearing
+    // (Some(None)) and leaving-untouched (None) are always allowed.
     let null_advanced_security = matches!(body.advanced_security, Some(None));
     if let Some(Some(b)) = body.advanced_security {
+        let mode = crate::wg::kernel::detect();
+        if !mode.supports_advanced_security() {
+            return Err(api_err(
+                StatusCode::PRECONDITION_FAILED,
+                "advancedSecurity = on|off requires the AmneziaWG kernel \
+                 module; this host is running the userspace amneziawg-go \
+                 fallback. Use 'auto' (null) or load the kernel module first.",
+            ));
+        }
         fields.insert("advanced_security".into(), if b { "1".into() } else { "0".into() });
     }
 

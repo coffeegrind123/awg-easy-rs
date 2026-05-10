@@ -4,6 +4,7 @@
 
 pub mod cli;
 pub mod config_gen;
+pub mod kernel;
 pub mod params;
 
 use anyhow::Result;

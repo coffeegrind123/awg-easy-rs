@@ -453,6 +453,14 @@ pub async fn get_interface(
         "dnsLockdown": iface.dns_lockdown,
         "dnsLockdownTarget": iface.dns_lockdown_target,
         "dnsBlockExternal": iface.dns_block_external,
+        // Which AmneziaWG implementation will service handshakes for
+        // this interface — the in-kernel module (full feature set,
+        // including per-peer AdvancedSecurity = on|off) or the
+        // amneziawg-go userspace fallback (chokes on explicit
+        // AdvancedSecurity peer lines). The UI uses this to gate the
+        // per-peer advancedSecurity tri-state and surface a status
+        // badge so operators don't ship a broken peer config.
+        "gamingMode": crate::wg::kernel::detect(),
         "enabled": iface.enabled,
     })))
 }
