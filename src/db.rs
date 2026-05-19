@@ -237,6 +237,17 @@ pub struct XrayInbound {
     /// Default uTLS fingerprint baked into share links (`chrome`,
     /// `firefox`, `safari`, `randomized`, `random`).
     pub fingerprint_default: String,
+    /// Stream transport multiplexed on top of Reality. `"tcp"` is the
+    /// classic VLESS+Reality+Vision stack every reference impl ships.
+    /// `"xhttp"` wraps the inner connection in HTTP framing with a
+    /// secret path — adopted by amnezia-client/#2339 to evade probes
+    /// that fingerprint raw TLS-on-443 flows. Vision flow is TCP-only
+    /// and is dropped when transport is xhttp.
+    pub transport: String,
+    /// Secret routing path for the xhttp transport — `/<32 hex chars>`,
+    /// generated on first switch to xhttp and kept stable until the
+    /// operator regenerates it. Empty when `transport == "tcp"`.
+    pub xhttp_path: String,
     /// Free-form text appended verbatim into the generated `server.json`'s
     /// inbound — escape hatch for sniffing/routing tweaks the UI doesn't
     /// model. Empty by default.
@@ -845,6 +856,8 @@ impl XrayInbound {
             private_key: row.get("private_key")?,
             public_key: row.get("public_key")?,
             fingerprint_default: row.get("fingerprint_default")?,
+            transport: row.get("transport")?,
+            xhttp_path: row.get("xhttp_path")?,
             additional_config: row.get("additional_config")?,
             enabled: int_to_bool(row.get::<_, i64>("enabled")?),
             created_at: row.get("created_at")?,
@@ -1144,6 +1157,15 @@ CREATE TABLE IF NOT EXISTS xray_inbound_table (
     private_key          TEXT NOT NULL DEFAULT '',
     public_key           TEXT NOT NULL DEFAULT '',
     fingerprint_default  TEXT NOT NULL DEFAULT 'chrome',
+    -- Stream transport multiplexed on top of Reality. Either 'tcp' (the
+    -- classic VLESS+Vision stack) or 'xhttp' (amnezia-client/#2339 —
+    -- HTTP-framed with a secret routing path). Vision flow is dropped
+    -- when transport is xhttp; the two are mutually exclusive.
+    transport            TEXT NOT NULL DEFAULT 'tcp',
+    -- Secret '/' + 32 hex chars path used by xhttpSettings. Empty
+    -- when transport is tcp; persisted across restarts so client
+    -- configs and the server's expected path don't drift.
+    xhttp_path           TEXT NOT NULL DEFAULT '',
     additional_config    TEXT NOT NULL DEFAULT '',
     enabled              INTEGER NOT NULL DEFAULT 0,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1434,6 +1456,27 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         )?;
         tracing::info!(
             "DB migration: added interfaces_table.dns_block_external (drop residual peer :53/:853 leaks)"
+        );
+    }
+    // Xray transport + xhttp routing path. Tracks amnezia-client/#2339,
+    // which lets operators flip a single inbound between classic
+    // VLESS+Vision (transport='tcp') and HTTP-framed (transport='xhttp').
+    // Defaults preserve the historical behaviour — every existing row
+    // keeps 'tcp' transport with an empty path.
+    if !column_exists(conn, "xray_inbound_table", "transport")? {
+        conn.execute_batch(
+            "ALTER TABLE xray_inbound_table ADD COLUMN transport TEXT NOT NULL DEFAULT 'tcp'",
+        )?;
+        tracing::info!(
+            "DB migration: added xray_inbound_table.transport (tcp|xhttp)"
+        );
+    }
+    if !column_exists(conn, "xray_inbound_table", "xhttp_path")? {
+        conn.execute_batch(
+            "ALTER TABLE xray_inbound_table ADD COLUMN xhttp_path TEXT NOT NULL DEFAULT ''",
+        )?;
+        tracing::info!(
+            "DB migration: added xray_inbound_table.xhttp_path (xhttpSettings.path)"
         );
     }
     // One-shot: replace the iptables-flavoured default hooks from earlier
@@ -2245,7 +2288,8 @@ pub fn get_xray_inbound() -> Result<XrayInbound> {
 
 const VALID_XRAY_INBOUND_COLUMNS: &[&str] = &[
     "port", "dest", "server_names", "private_key", "public_key",
-    "fingerprint_default", "additional_config", "enabled",
+    "fingerprint_default", "transport", "xhttp_path",
+    "additional_config", "enabled",
 ];
 
 pub fn update_xray_inbound(fields: &UpdateMap) -> Result<()> {

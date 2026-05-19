@@ -1275,10 +1275,11 @@ async function showAdminTab(tab, e) {
         : status.state === 'crashed' ? `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed × ${status.restart_attempts}</span>`
         : `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`
       ) : '<span class="pill">unknown</span>';
+      const isXhttp = inbound.transport === 'xhttp';
       el.innerHTML = `
         <div class="notice notice--info" style="margin-bottom:14px">
           <svg><use href="#i-shield"/></svg>
-          <div>Xray VLESS + Reality + Vision over TCP/${inbound.port}. Vision splices the inner TLS so the wire pattern matches a single TLS session — needs a clean IP and a reachable <span class="mono">dest</span>. Reality and Vision are <a href="https://github.com/XTLS/Xray-core" target="_blank" rel="noopener">Xray-core</a>-specific extensions; not portable to plain V2Ray.</div>
+          <div>Xray VLESS + Reality on TCP/${inbound.port}. Two transports — <span class="mono">tcp</span> wraps the inner TLS in Vision (single TLS session on the wire) and <span class="mono">xhttp</span> (<a href="https://github.com/amnezia-vpn/amnezia-client/pull/2339" target="_blank" rel="noopener">amnezia-client/#2339</a>) frames the same stream in HTTP/2 over a secret path. Both need a clean IP and a reachable <span class="mono">dest</span>; xhttp drops Vision flow since it's TCP-only.</div>
         </div>
         <div style="margin-bottom:14px">
           Bundled Xray ${esc(inbound.xrayVersion || '?')} · supervisor: ${stateLabel}
@@ -1308,6 +1309,22 @@ async function showAdminTab(tab, e) {
                     <select id="adm-xr-fp">
                       ${['chrome','firefox','safari','ios','android','edge','random'].map(f => `<option value="${f}" ${inbound.fingerprintDefault===f?'selected':''}>${f}</option>`).join('')}
                     </select>
+                  </div>
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-xr-transport" title="Stream transport multiplexed on top of Reality. TCP (Vision) is the classic VLESS+Reality+Vision stack every reference impl ships. XHTTP wraps the inner connection in HTTP framing over a secret routing path — adopted by amnezia-client/#2339 to evade probes that fingerprint raw TLS-on-443 flows. Vision flow is TCP-only and is dropped when XHTTP is selected.">Transport</label>
+                    <select id="adm-xr-transport" onchange="onXrayTransportChange()">
+                      <option value="tcp"   ${inbound.transport==='tcp'?'selected':''}>TCP (Vision)</option>
+                      <option value="xhttp" ${inbound.transport==='xhttp'?'selected':''}>XHTTP (HTTP/2 framing)</option>
+                    </select>
+                  </div>
+                  <div class="field" id="adm-xr-xhttp-path-field" style="${isXhttp?'':'display:none'}">
+                    <label class="field-label" title="Secret routing path the xhttp transport listens on — `/<32 hex chars>`. Generated automatically on the first switch to xhttp and kept stable until you rotate it. Any existing share links pointing at the old path stop working immediately after rotation.">XHTTP routing path</label>
+                    <div style="display:flex;gap:10px;align-items:center">
+                      <input type="text" id="adm-xr-xhttp-path" class="mono-input" readonly value="${esc(inbound.xhttpPath || '(none — switch transport to xhttp to generate)')}" style="flex:1">
+                      <button type="button" class="btn btn--ghost" onclick="regenerateXhttpPath()" ${inbound.xhttpPath?'':'disabled'}>Rotate</button>
+                    </div>
                   </div>
                 </div>
                 <div class="field">
@@ -2070,6 +2087,7 @@ async function saveXrayInbound(e) {
     dest: $('adm-xr-dest').value.trim(),
     serverNames: sni,
     fingerprintDefault: $('adm-xr-fp').value,
+    transport: $('adm-xr-transport').value,
     additionalConfig: $('adm-xr-extra').value,
     enabled: $('adm-xr-enabled').checked
   };
@@ -2085,6 +2103,25 @@ async function regenerateXrayKeys() {
   try {
     const r = await POST('/api/admin/xray/inbound/regenerate-keys', {});
     showToast('Keypair generated; pbk: ' + (r.publicKey || '').slice(0, 16) + '…', 'success');
+    showAdminTab('xray');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// Toggle visibility of the xhttp-path field when transport changes.
+// We don't trigger an auto-save here — the path is only generated on
+// the next save when transport='xhttp' is committed. Showing the field
+// pre-save just signals to the operator that there's about to be one.
+function onXrayTransportChange() {
+  const field = $('adm-xr-xhttp-path-field');
+  if (!field) return;
+  field.style.display = $('adm-xr-transport').value === 'xhttp' ? '' : 'none';
+}
+
+async function regenerateXhttpPath() {
+  if (!confirm('Rotate the XHTTP routing path? Every existing Browsing peer\'s share link becomes invalid — you\'ll need to redistribute QR codes.')) return;
+  try {
+    const r = await POST('/api/admin/xray/inbound/regenerate-xhttp-path', {});
+    showToast('Path rotated: ' + (r.xhttpPath || '').slice(0, 16) + '…', 'success');
     showAdminTab('xray');
   } catch(e) { showToast(e.message, 'error'); }
 }

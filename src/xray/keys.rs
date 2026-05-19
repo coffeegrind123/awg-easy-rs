@@ -123,6 +123,16 @@ pub fn generate_short_id() -> String {
     hex::encode(bytes)
 }
 
+/// XHTTP secret routing path: `/<32 hex chars>` (16 bytes of OsRng).
+/// Matches amnezia-client/#2339's server-side script, which generates
+/// the path via `openssl rand -hex 16`. The leading slash is part of the
+/// path because Xray's xhttpSettings.path expects a real URL path.
+pub fn generate_xhttp_path() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill(&mut bytes[..]);
+    format!("/{}", hex::encode(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +203,37 @@ Hash32: kKpGT8TO6gx4yAy_viz6-kU-uCIjGN3TzJJArIx_EEA
         }
     }
 
+    #[test]
+    fn xhttp_path_is_slash_plus_32_hex() {
+        let p = generate_xhttp_path();
+        assert_eq!(p.len(), 33);
+        assert!(p.starts_with('/'));
+        assert!(
+            p[1..].chars().all(|c| c.is_ascii_hexdigit()),
+            "non-hex chars in {p}"
+        );
+    }
+
+    #[test]
+    fn xhttp_path_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            assert!(seen.insert(generate_xhttp_path()));
+        }
+    }
+
     /// End-to-end check: actually run the bundled Xray binary's `x25519`
     /// subcommand and confirm we parse the keypair. This is the test
     /// that would have caught the v26 `Password (PublicKey):` label
     /// rename — pure fixture-based parser tests can drift from reality
     /// when a future Xray bump changes the label set.
+    ///
+    /// Shares the `xray_e2e_env` serial key with the config_gen e2e
+    /// tests — they all mutate the process-wide `WG_EASY_XRAY_DIR` and
+    /// race during binary extraction otherwise.
     #[cfg(xray_bundled)]
     #[tokio::test]
+    #[serial_test::serial(xray_e2e_env)]
     async fn end_to_end_x25519_against_bundled_binary() {
         // Use a unique XRAY_DIR so we don't fight other tests.
         let dir = format!(

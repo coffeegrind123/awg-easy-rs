@@ -241,6 +241,134 @@ async fn update_inbound_rejects_empty_server_names() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// Transport switching — covers amnezia-client/#2339 (xhttp transport).
+// The first switch from tcp -> xhttp must auto-generate a routing path
+// in the same write so the row never lands with transport='xhttp' and
+// an empty path (which would make supervisor and share both refuse).
+#[tokio::test]
+#[serial(db)]
+async fn switching_to_xhttp_auto_generates_path() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    // Sanity: defaults are tcp with no path.
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    assert_eq!(body["transport"], "tcp");
+    assert_eq!(body["xhttpPath"], "");
+
+    let (status, _) = json_post(
+        &app,
+        "/api/admin/xray/inbound",
+        &cookie,
+        json!({"transport": "xhttp"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    assert_eq!(body["transport"], "xhttp");
+    let path = body["xhttpPath"].as_str().unwrap();
+    // /<32 hex> — 33 chars total.
+    assert_eq!(path.len(), 33);
+    assert!(path.starts_with('/'));
+    assert!(path[1..].chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+// Switching back to tcp must NOT erase the path. Operators flipping
+// transports while debugging client compat keep the same path on return
+// so previously-handed-out share links still work.
+#[tokio::test]
+#[serial(db)]
+async fn switching_back_to_tcp_keeps_xhttp_path() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    json_post(&app, "/api/admin/xray/inbound", &cookie, json!({"transport": "xhttp"})).await;
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    let path1 = body["xhttpPath"].as_str().unwrap().to_string();
+    assert!(!path1.is_empty());
+
+    json_post(&app, "/api/admin/xray/inbound", &cookie, json!({"transport": "tcp"})).await;
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    assert_eq!(body["transport"], "tcp");
+    assert_eq!(body["xhttpPath"], path1);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn update_inbound_rejects_unknown_transport() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    let (status, body) = json_post(
+        &app,
+        "/api/admin/xray/inbound",
+        &cookie,
+        json!({"transport": "websocket"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("transport"));
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn regenerate_xhttp_path_rotates_value() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    // Switch to xhttp first so we have a path to rotate.
+    json_post(&app, "/api/admin/xray/inbound", &cookie, json!({"transport": "xhttp"})).await;
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    let before = body["xhttpPath"].as_str().unwrap().to_string();
+
+    let (status, resp) = json_post(
+        &app,
+        "/api/admin/xray/inbound/regenerate-xhttp-path",
+        &cookie,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after = resp["xhttpPath"].as_str().unwrap().to_string();
+    assert_ne!(before, after);
+    assert_eq!(after.len(), 33);
+
+    // And the inbound read endpoint must reflect the rotation.
+    let (_, body) = json_get(&app, "/api/admin/xray/inbound", &cookie).await;
+    assert_eq!(body["xhttpPath"], after);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn share_url_for_xhttp_drops_flow_and_adds_path() {
+    seed();
+    let _admin = create_admin();
+    let app = router();
+    let cookie = login(&app, "admin", "adminpass").await;
+
+    db::update_xray_keypair("PRIV", "PUB").unwrap();
+    db::update_host_port("vpn.example.com", 51820).unwrap();
+    json_post(&app, "/api/admin/xray/inbound", &cookie, json!({"transport": "xhttp"})).await;
+    let (_, c) = json_post(&app, "/api/xray/clients", &cookie, json!({"name": "alice"})).await;
+    let id = c["id"].as_i64().unwrap();
+
+    let (status, body) = raw_get(&app, &format!("/api/xray/clients/{id}/share"), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with("vless://"));
+    assert!(body.contains("type=xhttp"));
+    assert!(body.contains("path=%2F"), "expected percent-encoded path, got {body}");
+    assert!(!body.contains("flow="), "xhttp share must not carry Vision flow, got {body}");
+}
+
 #[tokio::test]
 #[serial(db)]
 async fn dest_candidates_returns_curated_list() {

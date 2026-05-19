@@ -9,15 +9,20 @@
 //! vless://<uuid>@<host>:<port>
 //!     ?encryption=none
 //!     &security=reality
-//!     &type=tcp
-//!     &flow=xtls-rprx-vision
-//!     &sni=<server_name>            ← realitySettings.serverNames[0]
-//!     &fp=<fingerprint>             ← uTLS profile (chrome|firefox|...)
-//!     &pbk=<public_key>             ← realitySettings.publicKey
-//!     &sid=<short_id>               ← realitySettings.shortIds[<peer>]
-//!     &spx=<spider_x_path>          ← realitySettings.spiderX (default "/")
+//!     &type=tcp|xhttp                ← streamSettings.network
+//!     &flow=xtls-rprx-vision         ← tcp only; omitted for xhttp
+//!     &path=<xhttp_path>             ← xhttp only; xhttpSettings.path
+//!     &sni=<server_name>             ← realitySettings.serverNames[0]
+//!     &fp=<fingerprint>              ← uTLS profile (chrome|firefox|...)
+//!     &pbk=<public_key>              ← realitySettings.publicKey
+//!     &sid=<short_id>                ← realitySettings.shortIds[<peer>]
+//!     &spx=<spider_x_path>           ← realitySettings.spiderX (default "/")
 //!     #<peer_label>
 //! ```
+//!
+//! For the xhttp transport (amnezia-client/#2339), Vision flow is
+//! TCP-only so we drop `flow` entirely and emit `path=<percent-encoded>`
+//! — matching `client/core/serialization/vless.cpp` Serialize().
 //!
 //! The `#fragment` is the human-readable label the client app shows. We
 //! percent-encode it because peer names can legitimately contain `#` or
@@ -67,6 +72,24 @@ pub fn build_vless_url(
     // Bracket bare IPv6 literals so URL parsers don't split on `:`.
     let host_part = format_host_for_url(host_clean);
 
+    // Transport-dependent middle of the query string. For tcp we keep
+    // the Vision flow that every classic VLESS+Reality client expects.
+    // For xhttp we drop `flow` entirely (Vision is TCP-only) and add
+    // the secret `path` — matching amnezia-client's vless.cpp
+    // Serialize() which writes `type=xhttp` plus `path=<encoded>`.
+    let transport_query = if inbound.transport == "xhttp" {
+        if inbound.xhttp_path.trim().is_empty() {
+            return Err(anyhow!(
+                "xray_inbound.transport is 'xhttp' but xhttp_path is empty \
+                 — generate one before sharing this peer"
+            ));
+        }
+        let path = percent_encode(&inbound.xhttp_path);
+        format!("&type=xhttp&path={path}")
+    } else {
+        "&type=tcp&flow=xtls-rprx-vision".to_string()
+    };
+
     // Emit BOTH `spx` (v2rayN / Hiddify / NekoBox / Streisand convention)
     // and `spiderX` (amnezia-client convention — see
     // amnezia-client/client/core/utils/serialization/vless.cpp:235).
@@ -75,8 +98,7 @@ pub fn build_vless_url(
         "vless://{uuid}@{host}:{port}\
          ?encryption=none\
          &security=reality\
-         &type=tcp\
-         &flow=xtls-rprx-vision\
+         {transport_query}\
          &sni={sni}\
          &fp={fp}\
          &pbk={pbk}\
@@ -115,6 +137,47 @@ pub fn build_amnezia_json(
         return Err(anyhow!("xray_inbound has no public key"));
     }
 
+    let is_xhttp = inbound.transport == "xhttp";
+    // Vision flow is TCP-only — when the server speaks xhttp, the
+    // client-side outbound must omit `flow` (empty string round-trips
+    // through Xray's JSON loader as "no flow") and add an
+    // `xhttpSettings` block mirroring the server template.
+    let user_entry = if is_xhttp {
+        serde_json::json!({
+            "id": client.uuid,
+            "encryption": "none",
+        })
+    } else {
+        serde_json::json!({
+            "id": client.uuid,
+            "flow": "xtls-rprx-vision",
+            "encryption": "none",
+        })
+    };
+
+    let mut stream_settings = serde_json::json!({
+        "network": if is_xhttp { "xhttp" } else { "tcp" },
+        "security": "reality",
+        "realitySettings": {
+            "fingerprint": inbound.fingerprint_default,
+            "serverName": sni,
+            "publicKey": inbound.public_key,
+            "shortId": client.short_id,
+            "spiderX": "",
+        },
+    });
+    if is_xhttp {
+        if inbound.xhttp_path.trim().is_empty() {
+            return Err(anyhow!(
+                "xray_inbound.transport is 'xhttp' but xhttp_path is empty"
+            ));
+        }
+        stream_settings["xhttpSettings"] = serde_json::json!({
+            "path": inbound.xhttp_path,
+            "mode": "auto",
+        });
+    }
+
     let json = serde_json::json!({
         "log": {"loglevel": "error"},
         "inbounds": [{
@@ -129,24 +192,10 @@ pub fn build_amnezia_json(
                 "vnext": [{
                     "address": host,
                     "port": inbound.port,
-                    "users": [{
-                        "id": client.uuid,
-                        "flow": "xtls-rprx-vision",
-                        "encryption": "none",
-                    }],
+                    "users": [user_entry],
                 }],
             },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "fingerprint": inbound.fingerprint_default,
-                    "serverName": sni,
-                    "publicKey": inbound.public_key,
-                    "shortId": client.short_id,
-                    "spiderX": "",
-                },
-            },
+            "streamSettings": stream_settings,
         }],
     });
     Ok(serde_json::to_string_pretty(&json)?)
@@ -196,6 +245,8 @@ mod tests {
             private_key: "PRIV".into(),
             public_key: "7qWmW4TmzGw3YcFUZg6xiI4TDbeS5TTVZO8S1-1SUgg".into(),
             fingerprint_default: "chrome".into(),
+            transport: "tcp".into(),
+            xhttp_path: String::new(),
             additional_config: String::new(),
             enabled: true,
             created_at: "now".into(),
@@ -282,5 +333,62 @@ mod tests {
             parsed["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"],
             "www.microsoft.com"
         );
+        assert_eq!(parsed["outbounds"][0]["streamSettings"]["network"], "tcp");
+        // No xhttpSettings on tcp transport.
+        assert!(parsed["outbounds"][0]["streamSettings"]["xhttpSettings"].is_null());
+    }
+
+    fn xhttp_inbound_fixture() -> db::XrayInbound {
+        let mut i = inbound_fixture();
+        i.transport = "xhttp".into();
+        i.xhttp_path = "/cafebabecafebabecafebabecafebabe".into();
+        i
+    }
+
+    #[test]
+    fn vless_url_for_xhttp_drops_flow_and_adds_path() {
+        let url = build_vless_url(&xhttp_inbound_fixture(), &client_fixture(), "vpn.example.com").unwrap();
+        // xhttp must NOT carry the Vision flow — Xray rejects vision
+        // over non-tcp transports outright.
+        assert!(!url.contains("flow="), "url must not contain flow=, got {url}");
+        assert!(url.contains("type=xhttp"));
+        // Path must be percent-encoded — leading slash and all hex chars
+        // are safe but we encode the slash to mirror amnezia-client's
+        // Serialize() (it goes through QUrl::toPercentEncoding which
+        // encodes '/' in query values).
+        assert!(
+            url.contains("path=%2Fcafebabecafebabecafebabecafebabe"),
+            "url missing percent-encoded path, got {url}"
+        );
+    }
+
+    #[test]
+    fn amnezia_json_for_xhttp_drops_flow_and_emits_xhttp_settings() {
+        let cfg = build_amnezia_json(&xhttp_inbound_fixture(), &client_fixture(), "vpn.example.com").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        // No flow on users[] when transport is xhttp.
+        let user = &parsed["outbounds"][0]["settings"]["vnext"][0]["users"][0];
+        assert!(user["flow"].is_null(), "users[0].flow must be omitted, got {user}");
+        let stream = &parsed["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "xhttp");
+        assert_eq!(stream["security"], "reality");
+        assert_eq!(stream["xhttpSettings"]["path"], "/cafebabecafebabecafebabecafebabe");
+        assert_eq!(stream["xhttpSettings"]["mode"], "auto");
+    }
+
+    #[test]
+    fn vless_url_xhttp_without_path_errors() {
+        let mut inbound = xhttp_inbound_fixture();
+        inbound.xhttp_path = String::new();
+        let res = build_vless_url(&inbound, &client_fixture(), "vpn.example.com");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn amnezia_json_xhttp_without_path_errors() {
+        let mut inbound = xhttp_inbound_fixture();
+        inbound.xhttp_path = String::new();
+        let res = build_amnezia_json(&inbound, &client_fixture(), "vpn.example.com");
+        assert!(res.is_err());
     }
 }

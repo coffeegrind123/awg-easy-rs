@@ -153,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(xray_e2e_env)]
     fn extract_then_skip_is_idempotent() {
         let _g = TEST_LOCK.lock().unwrap();
         let tmpdir = tempdir_for_test();

@@ -1,10 +1,15 @@
-//! REST endpoints for "Browsing mode" — Xray VLESS+Reality+Vision.
+//! REST endpoints for "Browsing mode" — Xray VLESS+Reality.
+//!
+//! Two transports — `transport: "tcp"` (classic Vision) and `"xhttp"`
+//! (amnezia-client/#2339; HTTP framing over a secret path). The path is
+//! generated server-side and persisted on the inbound row.
 //!
 //! | Method | Path                                       | Auth   | Purpose                       |
 //! |--------|--------------------------------------------|--------|-------------------------------|
 //! | GET    | /api/admin/xray/inbound                    | admin  | Read singleton inbound config |
 //! | POST   | /api/admin/xray/inbound                    | admin  | Update inbound (port/dest/…)  |
 //! | POST   | /api/admin/xray/inbound/regenerate-keys    | admin  | New x25519 keypair            |
+//! | POST   | /api/admin/xray/inbound/regenerate-xhttp-path | admin | New random xhttp routing path |
 //! | POST   | /api/admin/xray/inbound/probe-dest         | admin  | TLS probe a candidate dest    |
 //! | GET    | /api/admin/xray/inbound/dest-candidates    | admin  | Curated dest list             |
 //! | GET    | /api/admin/xray/status                     | admin  | Supervisor status snapshot    |
@@ -54,6 +59,13 @@ pub async fn get_inbound(
         "publicKey": inbound.public_key,
         "hasPrivateKey": !inbound.private_key.is_empty(),
         "fingerprintDefault": inbound.fingerprint_default,
+        "transport": inbound.transport,
+        // The path itself is not a long-term secret in the same sense as
+        // the private key (a network-active attacker who can sniff the
+        // first request to the inbound learns it), but we still surface
+        // it only via an explicit field so the admin UI can choose to
+        // hide it from non-share contexts.
+        "xhttpPath": inbound.xhttp_path,
         "additionalConfig": inbound.additional_config,
         "enabled": inbound.enabled,
         "xrayVersion": xray_version_string(),
@@ -88,6 +100,7 @@ pub async fn update_inbound(
             ("port", "port"),
             ("dest", "dest"),
             ("fingerprintDefault", "fingerprint_default"),
+            ("transport", "transport"),
             ("additionalConfig", "additional_config"),
             ("enabled", "enabled"),
         ];
@@ -102,6 +115,25 @@ pub async fn update_inbound(
         if let Some(v) = map.get("serverNames") {
             let s = serde_json::to_string(v).unwrap_or_default();
             fields.insert("server_names".into(), s);
+        }
+    }
+
+    // Auto-generate the xhttp routing path the first time the operator
+    // flips transport to xhttp. We do this in the same UpdateMap as the
+    // transport switch itself so the row never lands in an inconsistent
+    // state (transport='xhttp' with xhttp_path=''), which would cause
+    // both the supervisor and the share-link builder to refuse work.
+    if let Some(transport) = fields.get("transport") {
+        if transport == "xhttp" {
+            let current = db::get_xray_inbound().map_err(map_err)?;
+            if current.xhttp_path.trim().is_empty() {
+                fields.insert("xhttp_path".into(), xray::keys::generate_xhttp_path());
+            }
+        } else if transport == "tcp" {
+            // Don't drop the persisted xhttp_path on transport='tcp' —
+            // operators flipping back and forth (e.g. while debugging
+            // client compat) get the same path on return without losing
+            // the share links handed out earlier.
         }
     }
 
@@ -149,6 +181,14 @@ fn validate_inbound_update(fields: &db::UpdateMap) -> Result<(), (StatusCode, Js
             _ => {}
         }
     }
+    if let Some(transport) = fields.get("transport") {
+        if transport != "tcp" && transport != "xhttp" {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "transport must be 'tcp' or 'xhttp'",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -182,6 +222,29 @@ pub async fn regenerate_keys(
         StatusCode::NOT_IMPLEMENTED,
         "Xray support not bundled in this build",
     ))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/xray/inbound/regenerate-xhttp-path
+// ---------------------------------------------------------------------------
+//
+// Rotate the xhttp routing path. Any existing share links pointing at
+// the old path stop working immediately — operators rotate when they
+// suspect a path leak or as part of a periodic credential refresh. The
+// generator doesn't depend on the bundled Xray binary, so this endpoint
+// is available regardless of the `xray_bundled` cfg.
+
+pub async fn regenerate_xhttp_path(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _admin = require_admin(&jar, &state)?;
+    let new_path = xray::keys::generate_xhttp_path();
+    let mut fields = db::UpdateMap::new();
+    fields.insert("xhttp_path".into(), new_path.clone());
+    db::update_xray_inbound(&fields).map_err(map_err)?;
+    reconcile_supervisor().await;
+    Ok(Json(json!({ "xhttpPath": new_path })))
 }
 
 // ---------------------------------------------------------------------------

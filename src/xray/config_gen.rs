@@ -1,6 +1,14 @@
 //! Build the Xray `server.json` from the DB.
 //!
-//! Single inbound, VLESS over TCP, Reality stream security, Vision flow.
+//! Single inbound, VLESS, Reality stream security. Two transports are
+//! supported — switch via `XrayInbound::transport`:
+//!
+//! * `"tcp"` — classic VLESS+Reality+Vision (default; what every
+//!   pre-amnezia-client-2339 reference impl ships).
+//! * `"xhttp"` — VLESS+Reality with HTTP framing over a secret path.
+//!   Tracks amnezia-client/#2339. Vision flow is TCP-only, so client
+//!   entries drop `flow` entirely when transport is xhttp.
+//!
 //! No fallbacks (all 6 of the focused reference impls we surveyed ship
 //! without them — with Vision + a real `dest` the camouflage is the dest
 //! itself). Every enabled `XrayClient` row contributes one entry to
@@ -22,18 +30,35 @@ pub fn generate_server_config(
     let server_names: Value = serde_json::from_str(&inbound.server_names)
         .unwrap_or_else(|_| json!([]));
 
-    // VLESS clients carry only `id` + `flow`; the per-peer short-id lives
-    // alongside them in `realitySettings.shortIds[]`. We filter out
-    // disabled rows here so toggling "enabled" off in the UI immediately
-    // removes the client on next reload.
+    let is_xhttp = inbound.transport == "xhttp";
+
+    // VLESS clients carry only `id` (+ optional `flow`); the per-peer
+    // short-id lives alongside them in `realitySettings.shortIds[]`. We
+    // filter out disabled rows here so toggling "enabled" off in the UI
+    // immediately removes the client on next reload.
+    //
+    // Vision flow (`xtls-rprx-vision`) is TCP-only — Xray rejects it on
+    // xhttp transport with `vision can only be used over tcp`. The PR's
+    // server template (amnezia-client/#2339 configure_container.sh) emits
+    // `"flow": ""` in the xhttp branch; we match that exactly.
     let vless_clients: Vec<Value> = clients
         .iter()
         .filter(|c| c.enabled)
-        .map(|c| json!({
-            "id": c.uuid,
-            "flow": "xtls-rprx-vision",
-            "email": c.name,
-        }))
+        .map(|c| {
+            if is_xhttp {
+                json!({
+                    "id": c.uuid,
+                    "flow": "",
+                    "email": c.name,
+                })
+            } else {
+                json!({
+                    "id": c.uuid,
+                    "flow": "xtls-rprx-vision",
+                    "email": c.name,
+                })
+            }
+        })
         .collect();
 
     let short_ids: Vec<Value> = clients
@@ -56,6 +81,34 @@ pub fn generate_server_config(
         short_ids
     };
 
+    let mut stream_settings = json!({
+        "network": if is_xhttp { "xhttp" } else { "tcp" },
+        "security": "reality",
+        "realitySettings": {
+            "show": false,
+            "dest": inbound.dest,
+            "xver": 0,
+            "serverNames": server_names,
+            "privateKey": inbound.private_key,
+            "shortIds": short_ids,
+        },
+    });
+    if is_xhttp {
+        if inbound.xhttp_path.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "xray_inbound.transport is 'xhttp' but xhttp_path is empty \
+                 — generate one before enabling the inbound"
+            ));
+        }
+        // `mode: "auto"` lets Xray pick between the streaming variants
+        // (packet-up / stream-up / stream-one) based on what each client
+        // negotiates. Matches amnezia-client/#2339's template exactly.
+        stream_settings["xhttpSettings"] = json!({
+            "path": inbound.xhttp_path,
+            "mode": "auto",
+        });
+    }
+
     let mut inbound_obj = json!({
         "tag": "vless-reality-in",
         "listen": "0.0.0.0",
@@ -65,18 +118,7 @@ pub fn generate_server_config(
             "clients": vless_clients,
             "decryption": "none",
         },
-        "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-                "show": false,
-                "dest": inbound.dest,
-                "xver": 0,
-                "serverNames": server_names,
-                "privateKey": inbound.private_key,
-                "shortIds": short_ids,
-            },
-        },
+        "streamSettings": stream_settings,
         "sniffing": {
             "enabled": true,
             "destOverride": ["http", "tls", "quic"],
@@ -186,6 +228,8 @@ mod tests {
             private_key: "PRIV_KEY".into(),
             public_key: "PUB_KEY".into(),
             fingerprint_default: "chrome".into(),
+            transport: "tcp".into(),
+            xhttp_path: String::new(),
             additional_config: String::new(),
             enabled: true,
             created_at: "now".into(),
@@ -260,6 +304,49 @@ mod tests {
             parsed["inbounds"][0]["settings"]["clients"][0]["flow"],
             "xtls-rprx-vision"
         );
+        assert_eq!(
+            parsed["inbounds"][0]["streamSettings"]["network"],
+            "tcp"
+        );
+        // tcp transport must not emit xhttpSettings — that would confuse
+        // clients that switch on the presence of the field rather than
+        // reading `network`.
+        assert!(parsed["inbounds"][0]["streamSettings"]["xhttpSettings"].is_null());
+    }
+
+    #[test]
+    fn xhttp_transport_emits_xhttp_settings_and_empty_flow() {
+        let mut inbound = inbound_fixture();
+        inbound.transport = "xhttp".into();
+        inbound.xhttp_path = "/deadbeefdeadbeefdeadbeefdeadbeef".into();
+        let clients = vec![client_fixture("alice", "aaaa-uuid", "0000aaaa", true)];
+        let cfg = generate_server_config(&inbound, &clients).unwrap();
+        let parsed: Value = serde_json::from_str(&cfg).unwrap();
+        let stream = &parsed["inbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "xhttp");
+        // Reality stays on — xhttp wraps it, doesn't replace it. This is
+        // exactly what amnezia-client/#2339's server template does.
+        assert_eq!(stream["security"], "reality");
+        assert_eq!(stream["xhttpSettings"]["path"], "/deadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(stream["xhttpSettings"]["mode"], "auto");
+        // Vision flow is TCP-only; we must drop it on xhttp.
+        assert_eq!(
+            parsed["inbounds"][0]["settings"]["clients"][0]["flow"],
+            ""
+        );
+    }
+
+    #[test]
+    fn xhttp_without_path_is_a_hard_error() {
+        let mut inbound = inbound_fixture();
+        inbound.transport = "xhttp".into();
+        // xhttp_path intentionally left empty — the supervisor would
+        // refuse to run such a config anyway (Xray rejects empty
+        // xhttpSettings.path) but we want a clearer error at config-gen
+        // time so admin UI surfaces it.
+        let res = generate_server_config(&inbound, &[]);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("xhttp_path"));
     }
 
     #[test]
@@ -302,8 +389,15 @@ mod tests {
     /// regression net — Xray's JSON schema is a moving target across
     /// releases, and a bump that adds a required field will be caught
     /// here rather than at deploy time.
+    ///
+    /// Serialized against `xray_validates_xhttp_config` because both set
+    /// the process-wide `WG_EASY_XRAY_DIR` env var and `cargo test` runs
+    /// tests in parallel by default — without serial they race on the
+    /// bundled-binary extraction and one of them sees the partial file
+    /// before the rename.
     #[cfg(xray_bundled)]
     #[tokio::test]
+    #[serial_test::serial(xray_e2e_env)]
     async fn xray_validates_generated_config() {
         // Use a Reality keypair that's known-good (fresh from `xray x25519`).
         let inbound = db::XrayInbound {
@@ -348,6 +442,69 @@ mod tests {
         assert!(
             output.status.success(),
             "xray rejected our config\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        );
+        assert!(
+            stdout.contains("Configuration OK"),
+            "xray printed something but didn't say Configuration OK:\n{stdout}",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same shape as the tcp e2e but with transport='xhttp'. Catches
+    /// the case where a future Xray bump tightens xhttpSettings
+    /// validation — also confirms the path we generate is actually
+    /// accepted (Xray's parser rejects empty / non-slash-prefixed
+    /// paths) and that vision flow doesn't accidentally creep back in.
+    /// Shares the `xray_e2e_env` serial key with the tcp e2e.
+    #[cfg(xray_bundled)]
+    #[tokio::test]
+    #[serial_test::serial(xray_e2e_env)]
+    async fn xray_validates_xhttp_config() {
+        let inbound = db::XrayInbound {
+            private_key: "WNBaVNH48CG9SumFGQPEVCs1oSoZWS_hbclKHISa3ng".into(),
+            public_key: "7qWmW4TmzGw3YcFUZg6xiI4TDbeS5TTVZO8S1-1SUgg".into(),
+            // Distinct port from the tcp e2e — both can run in parallel
+            // (cargo test interleaves) and we don't want them fighting
+            // over a listener that xray briefly opens during `run -test`.
+            port: 14444,
+            transport: "xhttp".into(),
+            xhttp_path: "/0123456789abcdef0123456789abcdef".into(),
+            ..inbound_fixture()
+        };
+        let clients = vec![client_fixture(
+            "alice",
+            "11111111-2222-3333-4444-555555555555",
+            "0123456789abcdef",
+            true,
+        )];
+        let cfg = generate_server_config(&inbound, &clients).unwrap();
+
+        let dir = format!(
+            "/tmp/awg-easy-rs-xhttp-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0),
+        );
+        std::env::set_var("WG_EASY_XRAY_DIR", &dir);
+        let path = std::path::PathBuf::from(&dir).join("server.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, &cfg).unwrap();
+
+        let bin = crate::xray::runtime::resolve_binary().expect("resolve xray binary");
+        let output = tokio::process::Command::new(&bin)
+            .args(["run", "-test", "-c"])
+            .arg(&path)
+            .output()
+            .await
+            .expect("spawn xray run -test");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "xray rejected our xhttp config\nstdout:\n{stdout}\nstderr:\n{stderr}",
         );
         assert!(
             stdout.contains("Configuration OK"),

@@ -188,6 +188,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(xray::regenerate_keys),
         )
         .route(
+            "/admin/xray/inbound/regenerate-xhttp-path",
+            axum::routing::post(xray::regenerate_xhttp_path),
+        )
+        .route(
             "/admin/xray/inbound/probe-dest",
             axum::routing::post(xray::probe_dest),
         )
