@@ -41,7 +41,7 @@
 //! the bridges live in our DB where they belong.
 
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::db;
 
@@ -66,7 +66,7 @@ pub fn plugin_binary_name(plugin: &str) -> Option<&'static str> {
 
 /// Render the torrc body. Caller writes this to `<dns_dir>/torrc` and
 /// passes `-f <path>` to tor.
-pub fn generate(bundle: &db::DnsBundle, bin_dir: &PathBuf) -> Result<String> {
+pub fn generate(bundle: &db::DnsBundle, bin_dir: &Path) -> Result<String> {
     if !ALLOWED_PLUGINS.contains(&bundle.tor_plugin.as_str()) {
         return Err(anyhow!(
             "tor_plugin {:?} not in {:?}",

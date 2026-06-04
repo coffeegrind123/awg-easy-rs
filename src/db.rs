@@ -1676,6 +1676,20 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
 /// handle.  Must be called once at startup.
 pub fn init_db() -> Result<()> {
     let c = Connection::open(&CONFIG.db_path).context("Failed to open SQLite database")?;
+    // The DB holds service private keys, MTProxy secrets, the MasterDnsVPN
+    // encryption key, and password/TOTP material. Restrict it to the owner so
+    // it isn't world-readable on a shared host. Best-effort — a missing chmod
+    // (e.g. on a filesystem that doesn't support Unix perms) is non-fatal.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(
+            &CONFIG.db_path,
+            std::fs::Permissions::from_mode(0o600),
+        ) {
+            tracing::warn!("could not chmod 0600 the database file: {e}");
+        }
+    }
     create_tables(&c)?;
     seed_if_empty(&c)?;
     let mut guard = db_slot().lock().expect("Database lock poisoned");
@@ -1782,7 +1796,7 @@ pub fn get_interface() -> Result<Interface> {
         .query_row(
             "SELECT * FROM interfaces_table WHERE name = 'awg0'",
             [],
-            |row| Interface::from_row(row),
+            Interface::from_row,
         )
         .context("No interface row found")?;
     Ok(iface)
@@ -1870,7 +1884,7 @@ pub fn set_dns_lockdown(enabled: bool, target: &str, block_external: bool) -> Re
 pub fn get_all_clients() -> Result<Vec<Client>> {
     let c = conn();
     let mut stmt = c.prepare("SELECT * FROM clients_table ORDER BY id")?;
-    let rows = stmt.query_map([], |row| Client::from_row(row))?;
+    let rows = stmt.query_map([], Client::from_row)?;
     let mut clients = Vec::new();
     for row in rows {
         clients.push(row?);
@@ -2005,7 +2019,7 @@ pub fn get_user(id: i64) -> Result<User> {
     c.query_row(
         "SELECT * FROM users_table WHERE id = ?1",
         params![id],
-        |row| User::from_row(row),
+        User::from_row,
     )
     .context(format!("User {id} not found"))
 }
@@ -2015,7 +2029,7 @@ pub fn get_user_by_username(username: &str) -> Result<User> {
     c.query_row(
         "SELECT * FROM users_table WHERE username = ?1",
         params![username],
-        |row| User::from_row(row),
+        User::from_row,
     )
     .context(format!("User '{username}' not found"))
 }
@@ -2077,7 +2091,7 @@ pub fn get_user_config() -> Result<UserConfig> {
     c.query_row(
         "SELECT * FROM user_configs_table WHERE id = 'awg0'",
         [],
-        |row| UserConfig::from_row(row),
+        UserConfig::from_row,
     )
     .context("No user config row found")
 }
@@ -2117,7 +2131,7 @@ pub fn get_hooks() -> Result<Hooks> {
     c.query_row(
         "SELECT * FROM hooks_table WHERE id = 'awg0'",
         [],
-        |row| Hooks::from_row(row),
+        Hooks::from_row,
     )
     .context("No hooks row found")
 }
@@ -2144,7 +2158,7 @@ pub fn get_general() -> Result<General> {
     c.query_row(
         "SELECT * FROM general_table WHERE id = 1",
         [],
-        |row| General::from_row(row),
+        General::from_row,
     )
     .context("No general row found")
 }
@@ -2200,7 +2214,7 @@ pub fn get_one_time_link(token: &str) -> Result<OneTimeLink> {
     c.query_row(
         "SELECT * FROM one_time_links_table WHERE one_time_link = ?1",
         params![token],
-        |row| OneTimeLink::from_row(row),
+        OneTimeLink::from_row,
     )
     .context("One-time link not found")
 }
@@ -2229,7 +2243,7 @@ pub fn get_active_one_time_link(client_id: i64) -> Result<Option<OneTimeLink>> {
             "SELECT * FROM one_time_links_table \
              WHERE id = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
             params![client_id, now],
-            |row| OneTimeLink::from_row(row),
+            OneTimeLink::from_row,
         )
         .ok();
     Ok(row)
@@ -2281,7 +2295,7 @@ pub fn get_xray_inbound() -> Result<XrayInbound> {
     c.query_row(
         "SELECT * FROM xray_inbound_table WHERE id = 'xray0'",
         [],
-        |row| XrayInbound::from_row(row),
+        XrayInbound::from_row,
     )
     .context("No xray_inbound row found")
 }
@@ -2320,7 +2334,7 @@ pub fn list_xray_clients() -> Result<Vec<XrayClient>> {
         "SELECT * FROM xray_clients_table ORDER BY created_at ASC, id ASC",
     )?;
     let rows = stmt
-        .query_map([], |row| XrayClient::from_row(row))?
+        .query_map([], XrayClient::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -2330,7 +2344,7 @@ pub fn get_xray_client(id: i64) -> Result<XrayClient> {
     c.query_row(
         "SELECT * FROM xray_clients_table WHERE id = ?1",
         params![id],
-        |row| XrayClient::from_row(row),
+        XrayClient::from_row,
     )
     .context(format!("Xray client {id} not found"))
 }
@@ -2413,7 +2427,7 @@ pub fn get_dns_bundle() -> Result<DnsBundle> {
     c.query_row(
         "SELECT * FROM dns_bundle_table WHERE id = 'dns0'",
         [],
-        |row| DnsBundle::from_row(row),
+        DnsBundle::from_row,
     )
     .context("No dns_bundle row found")
 }
@@ -2454,7 +2468,7 @@ pub fn get_mtproxy_inbound() -> Result<MtproxyInbound> {
     c.query_row(
         "SELECT * FROM mtproxy_inbound_table WHERE id = 'mtproxy0'",
         [],
-        |row| MtproxyInbound::from_row(row),
+        MtproxyInbound::from_row,
     )
     .context("No mtproxy_inbound row found")
 }
@@ -2491,7 +2505,7 @@ pub fn list_mtproxy_users() -> Result<Vec<MtproxyUser>> {
         "SELECT * FROM mtproxy_users_table ORDER BY created_at ASC, id ASC",
     )?;
     let rows = stmt
-        .query_map([], |row| MtproxyUser::from_row(row))?
+        .query_map([], MtproxyUser::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -2501,7 +2515,7 @@ pub fn get_mtproxy_user_by_username(username: &str) -> Result<MtproxyUser> {
     c.query_row(
         "SELECT * FROM mtproxy_users_table WHERE username = ?1",
         params![username],
-        |row| MtproxyUser::from_row(row),
+        MtproxyUser::from_row,
     )
     .context(format!("MTProxy user {username:?} not found"))
 }
@@ -2568,7 +2582,7 @@ pub fn get_mdnsvpn_inbound() -> Result<MdnsvpnInbound> {
     c.query_row(
         "SELECT * FROM mdnsvpn_inbound_table WHERE id = 'mdnsvpn0'",
         [],
-        |row| MdnsvpnInbound::from_row(row),
+        MdnsvpnInbound::from_row,
     )
     .context("No mdnsvpn_inbound row found")
 }
@@ -2622,7 +2636,7 @@ pub fn list_mdnsvpn_clients() -> Result<Vec<MdnsvpnClient>> {
         "SELECT * FROM mdnsvpn_clients_table ORDER BY created_at ASC, id ASC",
     )?;
     let rows = stmt
-        .query_map([], |row| MdnsvpnClient::from_row(row))?
+        .query_map([], MdnsvpnClient::from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -2632,7 +2646,7 @@ pub fn get_mdnsvpn_client(id: i64) -> Result<MdnsvpnClient> {
     c.query_row(
         "SELECT * FROM mdnsvpn_clients_table WHERE id = ?1",
         params![id],
-        |row| MdnsvpnClient::from_row(row),
+        MdnsvpnClient::from_row,
     )
     .context(format!("MasterDnsVPN client #{id} not found"))
 }
@@ -2704,4 +2718,53 @@ pub fn toggle_mdnsvpn_client(id: i64, enabled: bool) -> Result<()> {
         params![bool_to_int(enabled), id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrations_land_columns_and_are_idempotent() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        // create_tables runs apply_migrations once as part of setup.
+        create_tables(&conn).expect("create_tables");
+
+        // Columns introduced by additive migrations must be present.
+        for (table, col) in [
+            ("clients_table", "advanced_security"),
+            ("clients_table", "additional_config"),
+            ("interfaces_table", "additional_config"),
+            ("interfaces_table", "dns_lockdown"),
+            ("user_configs_table", "default_additional_config"),
+        ] {
+            assert!(
+                column_exists(&conn, table, col).unwrap(),
+                "expected {table}.{col} after migrations"
+            );
+        }
+
+        // Re-running migrations must be a no-op, never an error (each ALTER is
+        // guarded by a column-existence check). Run twice more to be sure.
+        apply_migrations(&conn).expect("second apply");
+        apply_migrations(&conn).expect("third apply");
+        assert!(column_exists(&conn, "clients_table", "advanced_security").unwrap());
+    }
+
+    #[test]
+    fn migration_adds_column_to_old_schema() {
+        // Simulate a pre-migration DB: build the full schema, then drop a
+        // migrated column by recreating clients_table without it, and confirm
+        // apply_migrations re-adds it.
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        create_tables(&conn).expect("create_tables");
+        conn.execute_batch(
+            "ALTER TABLE clients_table DROP COLUMN advanced_security;",
+        )
+        .expect("drop column");
+        assert!(!column_exists(&conn, "clients_table", "advanced_security").unwrap());
+
+        apply_migrations(&conn).expect("apply_migrations re-adds column");
+        assert!(column_exists(&conn, "clients_table", "advanced_security").unwrap());
+    }
 }

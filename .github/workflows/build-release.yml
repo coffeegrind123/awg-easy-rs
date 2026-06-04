@@ -18,7 +18,39 @@ permissions:
   contents: write
 
 jobs:
+  # Quality gate: clippy (warnings are errors) and the full test suite. Runs on
+  # the host toolchain (no musl target / vendor blobs needed — the bundled-
+  # binary subsystems are cfg-gated off without the blobs, and the tests that
+  # require them are `#[ignore]`d). `build` depends on this, so a red test or a
+  # clippy warning blocks the release.
+  #
+  # Note: no `cargo fmt --check` gate. This codebase intentionally hand-aligns
+  # several declarations (struct-literal tables, multi-arg signatures) in a way
+  # stable rustfmt would undo, so a formatting gate would fight the house style.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            test-cargo-${{ runner.os }}-
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --all-targets
+
   build:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:

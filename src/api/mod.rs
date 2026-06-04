@@ -52,11 +52,27 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, SessionData>>>,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+/// Drop every session whose age exceeds `timeout_secs` from the in-memory
+/// store. Expiry is enforced lazily on each request, but without a sweep the
+/// map would retain entries for users who never return — this keeps it bounded.
+/// Called from the background cron.
+pub fn prune_expired_sessions(state: &AppState, timeout_secs: i64) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.retain(|_, s| !s.is_expired(timeout_secs));
     }
 }
 
@@ -72,13 +88,22 @@ impl FromRef<AppState> for Arc<Mutex<HashMap<String, SessionData>>> {
 // Error helpers
 // ---------------------------------------------------------------------------
 
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::Json;
 use serde_json::{json, Value};
 
 /// Convenience: build a JSON error response.
 pub fn api_err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "error": msg })))
+}
+
+/// Build a `Content-Disposition: attachment` header value for a download.
+/// `filename` is expected to be pre-sanitized; this still falls back to a bare
+/// `attachment` rather than panicking if the value can't form a valid header
+/// (replaces the previous `format!(...).parse().unwrap()` at every call site).
+pub fn attachment_disposition(filename: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"))
 }
 
 /// Convert an `anyhow::Error` into a 500 response. The detailed error
@@ -416,5 +441,47 @@ pub fn value_to_string(v: &Value) -> Option<String> {
         }
         Value::Null => None,
         Value::Object(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn session(age_secs: u64) -> SessionData {
+        SessionData {
+            user_id: 1,
+            username: "u".into(),
+            role: 0,
+            created_at: now().saturating_sub(age_secs),
+        }
+    }
+
+    #[test]
+    fn session_is_expired_past_timeout() {
+        let s = session(100);
+        assert!(s.is_expired(50), "100s-old session exceeds a 50s timeout");
+        assert!(!s.is_expired(200), "100s-old session is within a 200s timeout");
+    }
+
+    #[test]
+    fn prune_removes_only_expired_sessions() {
+        let state = AppState::new();
+        {
+            let mut m = state.sessions.lock().unwrap();
+            m.insert("fresh".into(), session(1));
+            m.insert("stale".into(), session(10_000));
+        }
+        prune_expired_sessions(&state, 3600);
+        let m = state.sessions.lock().unwrap();
+        assert!(m.contains_key("fresh"));
+        assert!(!m.contains_key("stale"));
     }
 }

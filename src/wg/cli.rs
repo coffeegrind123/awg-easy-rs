@@ -3,10 +3,10 @@
 //! All AmneziaWG commands go through this module.
 //! Binary is always `awg` / `awg-quick`.
 //!
-//! We deliberately avoid `bash -c` for any command that takes a
-//! caller-provided argument, so that the interface name (which is read from
-//! the database and could in principle be set to a malicious value by an
-//! admin) cannot be used to inject arbitrary shell commands.
+//! Every command is executed argv-style with no shell involvement, so the
+//! interface name (read from the database and in principle settable to a
+//! malicious value by an admin) cannot be used to inject arbitrary shell
+//! commands. There is deliberately no `bash -c` helper here.
 
 use std::process::{Command, Stdio};
 use std::io::Write;
@@ -19,24 +19,6 @@ fn awg_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-/// Execute a shell command via `bash -c` and return trimmed stdout.
-/// Reserved for the firewall module which needs shell features (chained
-/// rules, output redirection). Argv-only `run` helper below is preferred.
-pub fn exec(cmd: &str) -> Result<String> {
-    if !cfg!(target_os = "linux") || !awg_available() {
-        return Ok(String::new());
-    }
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(cmd)
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Command failed: {}: {}", cmd, stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Run `prog arg1 arg2 ...` with no shell involvement. Returns trimmed stdout.

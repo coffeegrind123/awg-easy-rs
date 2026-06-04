@@ -25,7 +25,7 @@
 //!    admin API) we POST/PATCH/DELETE through telemt's `/v1/users` to
 //!    converge on the DB roster.
 
-use std::io;
+use crate::proc::{pid_alive, restart_backoff, send_signal};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -306,27 +306,6 @@ async fn stop_if_running(reason: &str) {
     tracing::error!(pid, "telemt failed to exit even after SIGKILL");
 }
 
-fn pid_alive(pid: u32) -> bool {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    let err = io::Error::last_os_error();
-    err.raw_os_error() == Some(libc::EPERM)
-}
-
-fn send_signal(pid: u32, signum: libc::c_int) -> io::Result<()> {
-    // SAFETY: kill(2) is async-signal-safe and accepts an arbitrary
-    // pid_t — passing a non-existent PID returns ESRCH, which we
-    // surface via io::Error rather than panicking.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, signum) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
 fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
     tokio::spawn(async move {
         let pid = child.id().unwrap_or(0);
@@ -379,7 +358,7 @@ fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
             tracing::error!(attempts, "telemt restart attempts exceeded; supervisor giving up");
             return;
         }
-        let backoff = Duration::from_secs((1u64 << (attempts.min(6) - 1)).min(60));
+        let backoff = restart_backoff(attempts);
         tracing::info!(attempts, backoff_ms = backoff.as_millis() as u64, "scheduling telemt restart");
         sleep(backoff).await;
 

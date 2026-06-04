@@ -135,7 +135,7 @@ pub fn generate_server_peer(client: &db::Client) -> Result<String> {
         ));
     }
 
-    let safe_name = client.name.replace('\n', " ").replace('\r', " ");
+    let safe_name = client.name.replace(['\n', '\r'], " ");
 
     Ok(format!(
         "# Client: {name} ({id})\n\

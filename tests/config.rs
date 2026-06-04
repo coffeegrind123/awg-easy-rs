@@ -173,7 +173,9 @@ fn config_init_dns_parsed() {
 fn config_comma_only_env_yields_empty_vec() {
     // Comma-only strings should produce an empty Vec, which is filtered
     // to None by Config::load's check for init_dns.
-    let s = ",";
+    // black_box keeps the literal opaque so the `is_empty()` branch below isn't
+    // const-folded (this mirrors Config::load's runtime logic on env input).
+    let s = std::hint::black_box(",");
     let result: Option<Vec<String>> = if s.is_empty() {
         None
     } else {

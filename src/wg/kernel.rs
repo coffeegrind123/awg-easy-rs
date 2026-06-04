@@ -29,6 +29,15 @@
 //! `Unknown` rather than panicking.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Detection override. `0` = real probe; `1` = force Kernel; `2` = force
+/// Userspace; `3` = force Unknown. Lets integration tests pin a mode on a
+/// host where the real module state can't be controlled (CI runners never
+/// have the AmneziaWG kernel module loaded), and gives operators on exotic
+/// hosts an escape hatch via [`set_mode_override`]. Off by default, so
+/// production behaviour is unchanged.
+static MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 /// What state the kernel side of AmneziaWG is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -57,10 +66,30 @@ impl GamingMode {
     }
 }
 
+/// Force a specific [`GamingMode`] regardless of the host's real module
+/// state, or restore real detection with `None`. Process-global; intended
+/// for tests (which serialize via `serial_test`) and for operators who must
+/// override detection on an exotic host. Has no effect in normal operation.
+pub fn set_mode_override(mode: Option<GamingMode>) {
+    let code = match mode {
+        None => 0,
+        Some(GamingMode::Kernel) => 1,
+        Some(GamingMode::Userspace) => 2,
+        Some(GamingMode::Unknown) => 3,
+    };
+    MODE_OVERRIDE.store(code, Ordering::SeqCst);
+}
+
 /// Probe the host for the AmneziaWG kernel module's presence.
 /// Cheap (filesystem lookups only) — safe to call on every admin
 /// `GET /api/admin/interface` without caching.
 pub fn detect() -> GamingMode {
+    match MODE_OVERRIDE.load(Ordering::SeqCst) {
+        1 => return GamingMode::Kernel,
+        2 => return GamingMode::Userspace,
+        3 => return GamingMode::Unknown,
+        _ => {}
+    }
     if !cfg!(target_os = "linux") {
         return GamingMode::Unknown;
     }
@@ -104,6 +133,24 @@ mod tests {
         let mode = detect();
         assert!(matches!(
             mode,
+            GamingMode::Kernel | GamingMode::Userspace | GamingMode::Unknown
+        ));
+    }
+
+    #[test]
+    fn mode_override_forces_and_restores() {
+        // Forcing each mode makes detect() return it verbatim, and None
+        // restores real detection. Kept self-contained: always restore the
+        // override before returning so it can't leak into other unit tests.
+        set_mode_override(Some(GamingMode::Kernel));
+        assert_eq!(detect(), GamingMode::Kernel);
+        set_mode_override(Some(GamingMode::Userspace));
+        assert_eq!(detect(), GamingMode::Userspace);
+        set_mode_override(Some(GamingMode::Unknown));
+        assert_eq!(detect(), GamingMode::Unknown);
+        set_mode_override(None);
+        assert!(matches!(
+            detect(),
             GamingMode::Kernel | GamingMode::Userspace | GamingMode::Unknown
         ));
     }

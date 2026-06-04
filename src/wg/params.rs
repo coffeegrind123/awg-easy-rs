@@ -52,8 +52,8 @@ pub struct AwgParams {
 /// - Jc: 4..=12
 /// - Jmin: 8..=80
 /// - Jmax: (jmin+1)..=1280
-/// - S1: 15..=min(150, 1132)
-/// - S2: 15..=min(150, 1188)
+/// - S1: 15..=150 (spec max 1132, enforced on validate)
+/// - S2: 15..=150 (spec max 1188, enforced on validate)
 /// - H1-H4: distinct values in [5, 2147483647] (awg-go accepts both single values and ranges)
 /// - I1: random tagged blob per amnezia-client default format
 pub fn generate_awg_params() -> AwgParams {
@@ -64,10 +64,14 @@ pub fn generate_awg_params() -> AwgParams {
     // Spec: Jmax < 1280 (strict). We cap at 1279 to stay inside the spec
     // while still avoiding fragmentation against the default 1420 MTU.
     let jmax = rng.gen_range((jmin + 1).max(1)..=1279);
-    let s1 = rng.gen_range(15..=150.min(1132));
+    // awg-easy's default draws S1/S2 from 15..=150. The spec hard caps
+    // (1132 / 1188) are larger and enforced in `validate_awg_params`, so 150
+    // is always the effective upper bound when generating — the previous
+    // `150.min(1132)` was a no-op that read as a real clamp.
+    let s1 = rng.gen_range(15..=150);
     // Retry s2 until the spec rule `s1 + 56 != s2` is satisfied.
     let s2 = loop {
-        let candidate = rng.gen_range(15..=150.min(1188));
+        let candidate = rng.gen_range(15..=150);
         if candidate != s1 + 56 {
             break candidate;
         }
@@ -261,6 +265,33 @@ pub fn validate_awg_params(params: &AwgParams) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_s1_plus_56_equals_s2() {
+        let mut p = generate_awg_params();
+        // The spec forbids S1 + 56 == S2.
+        p.s1 = 100;
+        p.s2 = 156;
+        assert!(validate_awg_params(&p).is_err());
+        // One off the collision is fine.
+        p.s2 = 157;
+        assert!(validate_awg_params(&p).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_s1_s2() {
+        let mut p = generate_awg_params();
+        p.s1 = -1;
+        assert!(validate_awg_params(&p).is_err());
+        p.s1 = 1133; // > 1132 spec max
+        assert!(validate_awg_params(&p).is_err());
+
+        let mut p = generate_awg_params();
+        p.s2 = -1;
+        assert!(validate_awg_params(&p).is_err());
+        p.s2 = 1189; // > 1188 spec max
+        assert!(validate_awg_params(&p).is_err());
+    }
 
     #[test]
     fn empty_init_spec_is_valid() {

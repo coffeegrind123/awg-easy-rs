@@ -201,7 +201,7 @@ pub async fn list_clients(
 
     let clients = db::get_all_clients().map_err(map_err)?;
     let iface = db::get_interface().map_err(map_err)?;
-    let peers = wg::dump_peers(&iface.name).unwrap_or_default();
+    let peers = wg::dump_peers_async(iface.name.clone()).await.unwrap_or_default();
 
     let list: Vec<Value> = clients
         .into_iter()
@@ -325,11 +325,11 @@ pub async fn create_client(
     let client_id = db::create_client(&params).map_err(map_err)?;
 
     // Save config to apply changes
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     // Rebuild firewall if enabled
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(Json(json!({
@@ -356,7 +356,7 @@ pub async fn get_client(
         return Err(api_err(StatusCode::FORBIDDEN, "Access denied"));
     }
     let iface = db::get_interface().map_err(map_err)?;
-    let peers = wg::dump_peers(&iface.name).unwrap_or_default();
+    let peers = wg::dump_peers_async(iface.name.clone()).await.unwrap_or_default();
 
     Ok(Json(client_to_json(&client, &peers)))
 }
@@ -375,27 +375,27 @@ pub async fn update_client(
 
     // Validate numeric fields
     if let Some(mtu) = body.mtu {
-        if mtu < 68 || mtu > 65535 {
+        if !(68..=65535).contains(&mtu) {
             return Err(api_err(StatusCode::BAD_REQUEST, "MTU must be 68-65535"));
         }
     }
     if let Some(pk) = body.persistent_keepalive {
-        if pk != 0 && (pk < 15 || pk > 65535) {
+        if pk != 0 && !(15..=65535).contains(&pk) {
             return Err(api_err(StatusCode::BAD_REQUEST, "PersistentKeepalive must be 0 or 15-65535"));
         }
     }
     if let Some(jc) = body.j_c {
-        if jc < 1 || jc > 128 {
+        if !(1..=128).contains(&jc) {
             return Err(api_err(StatusCode::BAD_REQUEST, "JC must be 1-128"));
         }
     }
     if let Some(jmin) = body.j_min {
-        if jmin < 0 || jmin > 1279 {
+        if !(0..=1279).contains(&jmin) {
             return Err(api_err(StatusCode::BAD_REQUEST, "JMin must be 0-1279"));
         }
     }
     if let Some(jmax) = body.j_max {
-        if jmax < 1 || jmax > 1280 {
+        if !(1..=1280).contains(&jmax) {
             return Err(api_err(StatusCode::BAD_REQUEST, "JMax must be 1-1280"));
         }
         if let Some(jmin) = body.j_min {
@@ -435,6 +435,34 @@ pub async fn update_client(
             || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M:%S").is_ok();
         if !is_valid_date {
             return Err(api_err(StatusCode::BAD_REQUEST, "Invalid date format for expiresAt. Use ISO 8601 format."));
+        }
+    }
+
+    // Validate routing/firewall/DNS list entries before they're JSON-encoded
+    // into TEXT columns and later string-interpolated into the WireGuard config
+    // (`DNS =`, `AllowedIPs =`) or the per-client nftables transaction. Without
+    // this, a value carrying a newline or nft statement separator could inject
+    // extra config directives / firewall rule tokens.
+    if let Some(ref entries) = body.allowed_ips {
+        for e in entries {
+            validate_routing_entry(e)
+                .map_err(|m| api_err(StatusCode::BAD_REQUEST, &format!("Invalid allowedIps entry: {m}")))?;
+        }
+    }
+    if let Some(ref entries) = body.firewall_ips {
+        for e in entries {
+            validate_firewall_target(e)
+                .map_err(|m| api_err(StatusCode::BAD_REQUEST, &format!("Invalid firewallIps entry: {m}")))?;
+        }
+    }
+    if let Some(ref entries) = body.dns {
+        for e in entries {
+            if e.trim().parse::<std::net::IpAddr>().is_err() {
+                return Err(api_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid dns entry '{e}': must be a valid IP address"),
+                ));
+            }
         }
     }
 
@@ -585,12 +613,12 @@ pub async fn update_client(
     if null_advanced_security {
         db::set_client_advanced_security(client_id, None).map_err(map_err)?;
     }
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     // Rebuild firewall if enabled
     let iface = db::get_interface().map_err(map_err)?;
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(ok_success())
@@ -617,12 +645,12 @@ pub async fn delete_client(
     db::delete_client(client_id).map_err(|e| {
         api_err(StatusCode::NOT_FOUND, &e.to_string())
     })?;
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     // Rebuild firewall if enabled
     let iface = db::get_interface().map_err(map_err)?;
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(ok_success())
@@ -651,11 +679,13 @@ pub async fn client_configuration(
     })?;
 
     let filename = format!("{}.conf", sanitize_filename(&client.name));
-    let content_disp = format!("attachment; filename=\"{}\"", filename);
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/x-wireguard-config".parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, content_disp.parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/x-wireguard-config"),
+    );
+    headers.insert(header::CONTENT_DISPOSITION, super::attachment_disposition(&filename));
 
     Ok((StatusCode::OK, headers, config))
 }
@@ -710,12 +740,12 @@ pub async fn enable_client(
     }
 
     db::toggle_client(client_id, true).map_err(map_err)?;
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     // Rebuild firewall if enabled
     let iface = db::get_interface().map_err(map_err)?;
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(ok_success())
@@ -740,12 +770,12 @@ pub async fn disable_client(
     }
 
     db::toggle_client(client_id, false).map_err(map_err)?;
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     // Rebuild firewall if enabled
     let iface = db::get_interface().map_err(map_err)?;
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(ok_success())
@@ -797,6 +827,74 @@ pub async fn generate_one_time_link(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Validate a routing entry (`allowedIps` element): a bare IP literal or a
+/// CIDR. Rejects anything else — in particular values carrying whitespace or
+/// nft statement separators, which would otherwise be string-interpolated into
+/// the per-client nftables transaction (`firewall::gen_rules`) and could inject
+/// extra rule tokens.
+fn validate_routing_entry(entry: &str) -> Result<(), String> {
+    let e = entry.trim();
+    if e.is_empty() {
+        return Err("empty entry".into());
+    }
+    if e.parse::<std::net::IpAddr>().is_ok() || e.parse::<ipnet::IpNet>().is_ok() {
+        Ok(())
+    } else {
+        Err(format!("'{e}' is not a valid IP address or CIDR"))
+    }
+}
+
+/// Validate a firewall target (`firewallIps` element): `IP`, `IP/cidr`,
+/// `IP:port`, `[v6]:port`, optionally suffixed with `/tcp` or `/udp`. The
+/// address part must be a real IP literal and the port numeric in 1..=65535.
+/// Mirrors `firewall::parse_target` so nothing reaches the nft transaction that
+/// the rule generator can't safely render.
+fn validate_firewall_target(entry: &str) -> Result<(), String> {
+    let e = entry.trim();
+    if e.is_empty() {
+        return Err("empty entry".into());
+    }
+    let body = e
+        .strip_suffix("/tcp")
+        .or_else(|| e.strip_suffix("/udp"))
+        .unwrap_or(e);
+
+    // Bracketed IPv6 with optional :port — [2001:db8::1]:443
+    if let Some(rest) = body.strip_prefix('[') {
+        let (addr, after) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("'{e}': unterminated '[' in IPv6 literal"))?;
+        addr.parse::<std::net::Ipv6Addr>()
+            .map_err(|_| format!("'{e}': invalid IPv6 literal"))?;
+        if let Some(port) = after.strip_prefix(':') {
+            validate_port(port).map_err(|m| format!("'{e}': {m}"))?;
+        } else if !after.is_empty() {
+            return Err(format!("'{e}': trailing junk after ']' "));
+        }
+        return Ok(());
+    }
+
+    // Bare IP / CIDR, or IPv4 with a single :port. A value with >1 colon and
+    // no brackets is treated as a bare IPv6 literal (no port).
+    if body.matches(':').count() == 1 {
+        if let Some((addr, port)) = body.rsplit_once(':') {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                validate_routing_entry(addr).map_err(|m| format!("'{e}': {m}"))?;
+                validate_port(port).map_err(|m| format!("'{e}': {m}"))?;
+                return Ok(());
+            }
+        }
+    }
+    validate_routing_entry(body).map_err(|m| format!("'{e}': {m}"))
+}
+
+fn validate_port(port: &str) -> Result<(), String> {
+    match port.parse::<u32>() {
+        Ok(p) if (1..=65535).contains(&p) => Ok(()),
+        _ => Err(format!("port '{port}' must be 1-65535")),
+    }
+}
+
 fn sanitize_filename(name: &str) -> String {
     let s: String = name
         .chars()
@@ -815,5 +913,59 @@ fn sanitize_filename(name: &str) -> String {
         "client".to_string()
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn routing_entry_accepts_ip_and_cidr() {
+        for ok in ["10.0.0.1", "0.0.0.0/0", "::/0", "2001:db8::1", "10.8.0.0/24"] {
+            assert!(validate_routing_entry(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn routing_entry_rejects_junk_and_injection() {
+        for bad in [
+            "",
+            "not-an-ip",
+            "1.2.3.4 accept; add rule",
+            "1.2.3.4\naccept",
+            "1.2.3.4; drop table",
+        ] {
+            assert!(validate_routing_entry(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn firewall_target_accepts_valid_shapes() {
+        for ok in [
+            "8.8.8.8",
+            "8.8.8.8:53",
+            "8.8.8.8:53/udp",
+            "8.8.8.8:443/tcp",
+            "[2001:db8::1]:443",
+            "2001:db8::1",
+            "10.0.0.0/24",
+        ] {
+            assert!(validate_firewall_target(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn firewall_target_rejects_bad_port_and_injection() {
+        for bad in [
+            "",
+            "8.8.8.8:0",
+            "8.8.8.8:99999",
+            "8.8.8.8:53 accept;",
+            "evil.example.com",
+            "8.8.8.8\naccept",
+        ] {
+            assert!(validate_firewall_target(bad).is_err(), "should reject {bad:?}");
+        }
     }
 }

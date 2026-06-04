@@ -117,11 +117,13 @@ pub async fn one_time_link(
     let _ = db::delete_one_time_link(link.id);
 
     let filename = format!("{}.conf", sanitize_filename(&client.name));
-    let content_disp = format!("attachment; filename=\"{}\"", filename);
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/x-wireguard-config".parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, content_disp.parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/x-wireguard-config"),
+    );
+    headers.insert(header::CONTENT_DISPOSITION, super::attachment_disposition(&filename));
 
     Ok((StatusCode::OK, headers, config))
 }
@@ -147,7 +149,7 @@ pub async fn metrics_json(
 
     let iface = db::get_interface().map_err(map_err)?;
     let clients = db::get_all_clients().map_err(map_err)?;
-    let peers = wg::dump_peers(&iface.name).unwrap_or_default();
+    let peers = wg::dump_peers_async(iface.name.clone()).await.unwrap_or_default();
 
     let metrics: Vec<Value> = clients
         .iter()
@@ -201,7 +203,7 @@ pub async fn metrics_prometheus(
 
     let iface = db::get_interface().map_err(map_err)?;
     let clients = db::get_all_clients().map_err(map_err)?;
-    let peers = wg::dump_peers(&iface.name).unwrap_or_default();
+    let peers = wg::dump_peers_async(iface.name.clone()).await.unwrap_or_default();
 
     let mut output = String::new();
 

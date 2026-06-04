@@ -69,7 +69,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
 [dev-dependencies]
 serial_test = { version = "3", features = ["async"] }

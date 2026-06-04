@@ -9,7 +9,7 @@
 //! | POST   | /api/me/password | Change password      |
 //! | POST   | /api/me/totp     | Enable/disable TOTP  |
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
@@ -20,6 +20,7 @@ use super::{api_err, map_err, ok_success, require_auth, AppState};
 use crate::{auth, db};
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type AttemptStore = HashMap<String, Vec<u64>>;
 
 static LOGIN_ATTEMPTS: OnceLock<Mutex<AttemptStore>> = OnceLock::new();
+
+/// Hard cap on the number of distinct rate-limit keys (usernames + IPs) we
+/// track at once. An attacker who cycles through unbounded distinct usernames
+/// (or, behind a trusted proxy, spoofed `X-Forwarded-For` values) would
+/// otherwise grow the map without bound — a memory-exhaustion DoS, since each
+/// distinct value left a permanent entry. When the map exceeds this after a
+/// live-window sweep we fail closed (429) rather than keep allocating.
+const MAX_RATE_LIMIT_KEYS: usize = 16_384;
+
+/// Longest subject string folded into a rate-limit key. Bounds per-key memory
+/// regardless of how long a submitted username is.
+const RATE_LIMIT_SUBJECT_MAX: usize = 64;
+
+/// Build a length-bounded rate-limit key. The subject (username or IP) is
+/// truncated on a char boundary so an attacker can't blow up key size with a
+/// megabyte-long username.
+fn rate_limit_key(prefix: &str, subject: &str) -> String {
+    let bounded: String = subject.chars().take(RATE_LIMIT_SUBJECT_MAX).collect();
+    format!("{prefix}:{bounded}")
+}
 
 fn login_attempts() -> &'static Mutex<AttemptStore> {
     LOGIN_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -41,26 +62,31 @@ pub fn reset_login_attempts() {
     }
 }
 
-/// Extract a best-effort client identifier from the request headers. Honours
-/// `X-Forwarded-For` / `X-Real-IP` when set by a trusted reverse proxy; falls
-/// back to None when running directly behind no proxy. Used for rate
-/// limiting only — not for authentication decisions.
-fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            let s = first.trim();
+/// Resolve a client identifier for rate limiting. `X-Forwarded-For` /
+/// `X-Real-IP` are honoured ONLY when `TRUST_PROXY=true` — those headers are
+/// trivially forged by a direct client, so trusting them unconditionally let
+/// an attacker rotate the header to evade the per-IP bucket (and mint
+/// unlimited distinct keys). When not trusting the proxy, or when no header is
+/// present, we fall back to the real peer socket address. Used for rate
+/// limiting only — never for authentication decisions.
+fn resolve_client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
+    if crate::config::CONFIG.trust_proxy {
+        if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+            if let Some(first) = v.split(',').next() {
+                let s = first.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
+            let s = v.trim();
             if !s.is_empty() {
                 return Some(s.to_string());
             }
         }
     }
-    if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
-        let s = v.trim();
-        if !s.is_empty() {
-            return Some(s.to_string());
-        }
-    }
-    None
+    peer.map(|a| a.ip().to_string())
 }
 
 /// Pre-computed Argon2id hash of a constant string. Used to make username
@@ -99,13 +125,16 @@ pub async fn create_session(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    // Optional so the extractor never fails: present in production (the router
+    // is served with connect-info), absent in `oneshot` unit tests.
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(body): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<Value>), (StatusCode, Json<Value>)> {
     // Rate limiting: per-username (10/min) AND per-source-IP (50/min). The
     // IP bucket prevents an attacker from spreading attempts across many
     // usernames; the username bucket prevents distributed credential-stuffing
     // against a single account.
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = resolve_client_ip(&headers, peer.map(|ConnectInfo(a)| a));
     {
         let mut attempts = login_attempts().lock().map_err(|e| {
             tracing::error!("Rate limit lock poisoned: {e}");
@@ -116,11 +145,29 @@ pub async fn create_session(
             .unwrap_or_default()
             .as_secs();
 
-        // Per-username bucket
-        let user_window = attempts
-            .entry(format!("user:{}", body.username))
-            .or_default();
-        user_window.retain(|t| now - t < 60);
+        // Bound the key space. When the map has grown large, sweep out every
+        // window whose timestamps have all aged out of the 60s horizon — that
+        // alone reclaims the keys left by a username/IP-cycling attacker. If
+        // we're still over the cap afterwards we're under a genuine flood, so
+        // fail closed for new subjects rather than keep allocating.
+        if attempts.len() > MAX_RATE_LIMIT_KEYS {
+            attempts.retain(|_, window| {
+                window.retain(|t| now.saturating_sub(*t) < 60);
+                !window.is_empty()
+            });
+            if attempts.len() > MAX_RATE_LIMIT_KEYS {
+                return Err(api_err(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Server is rate limiting. Try again later.",
+                ));
+            }
+        }
+
+        // Per-username bucket. Empty windows are evicted so a one-shot attempt
+        // against a never-seen username doesn't leave a permanent key.
+        let user_key = rate_limit_key("user", &body.username);
+        let user_window = attempts.entry(user_key.clone()).or_default();
+        user_window.retain(|t| now.saturating_sub(*t) < 60);
         if user_window.len() >= 10 {
             return Err(api_err(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -131,9 +178,15 @@ pub async fn create_session(
 
         // Per-source-IP bucket
         if let Some(ip) = client_ip.as_deref() {
-            let ip_window = attempts.entry(format!("ip:{ip}")).or_default();
-            ip_window.retain(|t| now - t < 60);
+            let ip_key = rate_limit_key("ip", ip);
+            let ip_window = attempts.entry(ip_key).or_default();
+            ip_window.retain(|t| now.saturating_sub(*t) < 60);
             if ip_window.len() >= 50 {
+                // This username's attempt was already recorded above; drop its
+                // window if it would otherwise linger as a stale single entry.
+                if attempts.get(&user_key).is_some_and(|w| w.is_empty()) {
+                    attempts.remove(&user_key);
+                }
                 return Err(api_err(
                     StatusCode::TOO_MANY_REQUESTS,
                     "Too many login attempts from this address. Try again later.",
@@ -529,7 +582,7 @@ fn check_totp_rate_limit(user_id: i64) -> Result<(), (StatusCode, Json<Value>)> 
         .unwrap_or_default()
         .as_secs();
     let window = attempts.entry(user_id).or_default();
-    window.retain(|t| now - t < 300);
+    window.retain(|t| now.saturating_sub(*t) < 300);
     if window.len() >= 5 {
         return Err(api_err(
             StatusCode::TOO_MANY_REQUESTS,
@@ -651,4 +704,47 @@ fn verify_totp_secret(secret: &[u8], code: &str) -> Result<bool, (StatusCode, Js
     })?;
 
     Ok(valid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn rate_limit_key_truncates_long_subjects() {
+        // A megabyte-long username must not produce a megabyte-long key.
+        let long = "a".repeat(5000);
+        let key = rate_limit_key("user", &long);
+        assert!(key.starts_with("user:"));
+        assert_eq!(key.len(), "user:".len() + RATE_LIMIT_SUBJECT_MAX);
+    }
+
+    #[test]
+    fn rate_limit_key_truncates_on_char_boundary() {
+        // Multi-byte chars: take() counts chars, never splitting a code point.
+        let s = "é".repeat(200);
+        let key = rate_limit_key("ip", &s);
+        assert!(key.starts_with("ip:"));
+        // 64 two-byte chars → 128 bytes of subject.
+        assert_eq!(key.len(), "ip:".len() + RATE_LIMIT_SUBJECT_MAX * 2);
+    }
+
+    #[test]
+    fn resolve_client_ip_uses_peer_when_proxy_untrusted() {
+        // Default config has trust_proxy = false, so a forged X-Forwarded-For
+        // is ignored and the real peer address is used.
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 5555);
+        assert_eq!(
+            resolve_client_ip(&h, Some(peer)).as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn resolve_client_ip_none_without_peer() {
+        assert_eq!(resolve_client_ip(&HeaderMap::new(), None), None);
+    }
 }

@@ -568,7 +568,7 @@ pub async fn client_config_toml(
     let filename = format!("client_config_{}.toml", sanitize_filename(&client.name));
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{filename}\"").parse().unwrap(),
+        super::attachment_disposition(&filename),
     );
     Ok((StatusCode::OK, headers, bundle.config_toml))
 }
@@ -588,7 +588,7 @@ pub async fn client_resolvers_txt(
     let filename = format!("client_resolvers_{}.txt", sanitize_filename(&client.name));
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{filename}\"").parse().unwrap(),
+        super::attachment_disposition(&filename),
     );
     Ok((StatusCode::OK, headers, bundle.resolvers_txt))
 }

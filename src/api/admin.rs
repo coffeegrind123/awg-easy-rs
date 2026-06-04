@@ -28,6 +28,16 @@ fn get_i64(map: &serde_json::Map<String, Value>, key: &str) -> Option<i64> {
     map.get(key).and_then(|v| v.as_i64())
 }
 
+/// A magic header is `digits` or `digits-digits` — nothing else. Both halves
+/// must be non-empty and each must fit in an `i64`.
+fn is_valid_magic_header(s: &str) -> bool {
+    let parse_part = |p: &str| -> bool { !p.is_empty() && p.parse::<i64>().is_ok() };
+    match s.split_once('-') {
+        Some((lo, hi)) => parse_part(lo) && parse_part(hi),
+        None => parse_part(s),
+    }
+}
+
 fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (StatusCode, Json<Value>)> {
     let jc = get_i64(map, "jC").or_else(|| get_i64(map, "jc"));
     let jmin = get_i64(map, "jMin").or_else(|| get_i64(map, "jmin"));
@@ -40,7 +50,7 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
     if let Some(jc) = jc {
         // Kernel permits jc == 0 ("junk packets disabled"); upstream
         // awg-easy required >= 1. We follow the kernel and accept 0.
-        if jc < 0 || jc > 128 {
+        if !(0..=128).contains(&jc) {
             return Err(api_err(StatusCode::BAD_REQUEST, "Jc must be 0-128"));
         }
     }
@@ -53,13 +63,13 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
         }
     }
     if let Some(jmin) = jmin {
-        if jmin < 0 || jmin > 1279 {
+        if !(0..=1279).contains(&jmin) {
             return Err(api_err(StatusCode::BAD_REQUEST, "Jmin must be 0-1279"));
         }
     }
     if let Some(jmax) = jmax {
         // Spec: Jmax < 1280 (strict)
-        if jmax < 1 || jmax > 1279 {
+        if !(1..=1279).contains(&jmax) {
             return Err(api_err(StatusCode::BAD_REQUEST, "Jmax must be 1-1279"));
         }
     }
@@ -75,24 +85,24 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
         }
     }
     if let Some(s1) = s1 {
-        if s1 < 0 || s1 > 1132 {
+        if !(0..=1132).contains(&s1) {
             return Err(api_err(StatusCode::BAD_REQUEST, "S1 must be 0-1132"));
         }
     }
     if let Some(s2) = s2 {
-        if s2 < 0 || s2 > 1188 {
+        if !(0..=1188).contains(&s2) {
             return Err(api_err(StatusCode::BAD_REQUEST, "S2 must be 0-1188"));
         }
     }
     if let Some(s3) = s3 {
         // Per gl-inet AmneziaWG-2.0 parameter table.
-        if s3 < 0 || s3 > 1216 {
+        if !(0..=1216).contains(&s3) {
             return Err(api_err(StatusCode::BAD_REQUEST, "S3 must be 0-1216"));
         }
     }
     if let Some(s4) = s4 {
         // Per AmneziaWG-2.0 transport-message padding limit.
-        if s4 < 0 || s4 > 32 {
+        if !(0..=32).contains(&s4) {
             return Err(api_err(StatusCode::BAD_REQUEST, "S4 must be 0-32"));
         }
     }
@@ -114,10 +124,27 @@ fn validate_awg_params(map: &serde_json::Map<String, Value>) -> Result<(), (Stat
         }
     }
 
-    // Validate H1-H4 non-overlapping
+    // Validate H1-H4. Each magic header is a single integer or an
+    // `int-int` range. Enforce that grammar strictly (digits and at most one
+    // dash) — these values are written verbatim into the generated
+    // `[Interface]` block, so a newline or stray token would inject arbitrary
+    // config directives (e.g. a `PostUp` line) into awg-quick's input.
     let h_keys = ["h1", "h2", "h3", "h4"];
+    for k in h_keys {
+        if let Some(s) = map.get(k).and_then(|v| v.as_str()) {
+            if !s.is_empty() && !is_valid_magic_header(s) {
+                return Err(api_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "{} must be a single integer or an int-int range (digits and one dash only)",
+                        k.to_uppercase()
+                    ),
+                ));
+            }
+        }
+    }
     let ranges: Vec<Option<(i64, i64)>> = h_keys.iter().map(|k| {
-        map.get(*k).and_then(|v| v.as_str()).map(|s| {
+        map.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| {
             let parts: Vec<&str> = s.splitn(2, '-').collect();
             let start: i64 = parts[0].parse().unwrap_or(0);
             let end: i64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(start);
@@ -286,7 +313,7 @@ pub async fn update_hooks(
     if !fields.is_empty() {
         db::update_hooks(&fields).map_err(map_err)?;
         // Re-save config to apply new hooks
-        wg::save_config().map_err(map_err)?;
+        wg::save_config_async().await.map_err(map_err)?;
     }
 
     Ok(ok_success())
@@ -527,8 +554,8 @@ pub async fn update_interface(
         if let Some(val) = map.get("dnsLockdownTarget") {
             if let Some(s) = value_to_string(val) {
                 let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    if trimmed.parse::<std::net::IpAddr>().is_err() {
+                if !trimmed.is_empty()
+                    && trimmed.parse::<std::net::IpAddr>().is_err() {
                         return Err((
                             StatusCode::BAD_REQUEST,
                             Json(json!({
@@ -538,7 +565,6 @@ pub async fn update_interface(
                             })),
                         ));
                     }
-                }
                 fields.insert("dns_lockdown_target".into(), trimmed.to_string());
             }
         }
@@ -556,7 +582,7 @@ pub async fn update_interface(
 
     if !fields.is_empty() {
         db::update_interface(&fields).map_err(map_err)?;
-        wg::save_config().map_err(map_err)?;
+        wg::save_config_async().await.map_err(map_err)?;
 
         // Apply firewall changes if firewall_enabled or any DNS
         // lockdown field was touched. We re-read the interface row
@@ -574,7 +600,7 @@ pub async fn update_interface(
                 // rebuild_rules handles both per-peer filtering and DNS
                 // lockdown atomically, with the right "off" semantics
                 // for each independently. Cheaper than two calls.
-                crate::firewall::rebuild_rules().map_err(map_err).ok();
+                crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
 
                 // If per-peer firewall was specifically turned off and
                 // DNS lockdown is also off, rebuild_rules() already
@@ -634,7 +660,7 @@ pub async fn change_cidr(
         db::update_client(client.id, &fields).map_err(map_err)?;
     }
 
-    wg::save_config().map_err(map_err)?;
+    wg::save_config_async().await.map_err(map_err)?;
 
     Ok(ok_success())
 }
@@ -649,12 +675,12 @@ pub async fn restart_interface(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _admin = require_admin(&jar, &state)?;
 
-    wg::restart().map_err(map_err)?;
+    wg::restart_async().await.map_err(map_err)?;
 
     // Re-apply firewall if enabled
     let iface = db::get_interface().map_err(map_err)?;
     if iface.firewall_enabled {
-        crate::firewall::rebuild_rules().map_err(map_err).ok();
+        crate::firewall::rebuild_rules_async().await.map_err(map_err).ok();
     }
 
     Ok(ok_success())
@@ -704,4 +730,23 @@ fn get_private_ips() -> Vec<String> {
         }
     }
     ips
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magic_header_accepts_int_and_range() {
+        for ok in ["5", "5-2147483647", "100-200", "0", "1-2"] {
+            assert!(is_valid_magic_header(ok), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn magic_header_rejects_injection_and_junk() {
+        for bad in ["5\nPostUp = id", "5 6", "abc", "5-", "-5", "", "5-x", "1-2-3"] {
+            assert!(!is_valid_magic_header(bad), "should reject {bad:?}");
+        }
+    }
 }

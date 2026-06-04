@@ -281,9 +281,10 @@ mod tests {
         // Either the handshake fails (server rejects unknown SNI) or
         // the report comes back ok=false. Both are acceptable rejection
         // signals — the probe must not silently pass.
-        match res {
-            Ok(r) => assert!(!r.ok),
-            Err(_) => {} // handshake rejection is also valid
+        // A handshake error is also a valid rejection signal; we only need to
+        // ensure that a *successful* probe reports ok=false.
+        if let Ok(r) = res {
+            assert!(!r.ok);
         }
     }
 }

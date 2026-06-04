@@ -1,4 +1,4 @@
-use awg_easy_rs::{api, auth, config, db, firewall, wg};
+use awg_easy_rs::{api, config, db, firewall, init_setup, wg};
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -89,17 +89,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("MasterDnsVPN supervisor startup failed (non-fatal): {e}");
     }
 
-    // Start background cron job (every 60 seconds)
+    let app_state = api::AppState::new();
+
+    // Start background cron job (every 60 seconds): expire clients/one-time
+    // links and sweep expired sessions out of the in-memory store.
+    let cron_state = app_state.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             if let Err(e) = wg::cron_job() {
                 tracing::error!("Cron job failed: {e}");
             }
+            match db::get_general() {
+                Ok(g) => api::prune_expired_sessions(&cron_state, g.session_timeout),
+                Err(e) => tracing::error!("session prune skipped (general read failed): {e}"),
+            }
         }
     });
-
-    let app_state = api::AppState::new();
 
     // Static asset routes
     let static_routes = Router::new()
@@ -153,7 +159,14 @@ async fn main() -> anyhow::Result<()> {
             _ = sigint.recv()  => tracing::info!("SIGINT received; shutting down"),
         }
     };
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    // Serve with connect-info so handlers can read the real peer socket
+    // address (used by the login rate limiter when TRUST_PROXY is off).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
 
     // Post-serve cleanup. Order matters: stop Xray + DNS + MTProxy
     // supervisor children first so they're reaped before we tear down
@@ -302,55 +315,20 @@ fn run_init_setup() -> anyhow::Result<()> {
         .init_password
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("INIT_PASSWORD is required when INIT_ENABLED=true"))?;
-    if password.len() < 6 {
-        return Err(anyhow::anyhow!("INIT_PASSWORD must be at least 6 characters"));
-    }
 
-    let hash = auth::hash_password(password)?;
-    db::create_user(&db::CreateUserParams {
-        username: username.into(),
-        password: hash,
-        email: None,
-        name: "Admin".into(),
-        role: 1,
-        totp_key: None,
-        totp_verified: false,
-        enabled: true,
-    })?;
-    tracing::info!("INIT_ENABLED: created admin user '{username}'");
+    let params = init_setup::InitSetupParams {
+        username,
+        password,
+        host: cfg.init_host.as_deref(),
+        port: cfg.init_port,
+        ipv4_cidr: cfg.init_ipv4_cidr.as_deref(),
+        ipv6_cidr: cfg.init_ipv6_cidr.as_deref(),
+        dns: cfg.init_dns.as_deref(),
+        allowed_ips: cfg.init_allowed_ips.as_deref(),
+    };
 
-    if let Some(host) = cfg.init_host.as_deref() {
-        let port = cfg.init_port.unwrap_or(51820) as i64;
-        db::update_host_port(host, port)?;
-        let mut iface_fields = db::UpdateMap::new();
-        iface_fields.insert("port".into(), port.to_string());
-        if let Some(cidr) = cfg.init_ipv4_cidr.as_deref() {
-            iface_fields.insert("ipv4_cidr".into(), cidr.into());
-        }
-        if let Some(cidr) = cfg.init_ipv6_cidr.as_deref() {
-            iface_fields.insert("ipv6_cidr".into(), cidr.into());
-        }
-        db::update_interface(&iface_fields)?;
+    if init_setup::provision_initial_setup(&params)? {
+        tracing::info!("INIT_ENABLED: created admin user '{username}' and completed setup");
     }
-
-    if let Some(ref dns) = cfg.init_dns {
-        let mut fields = db::UpdateMap::new();
-        fields.insert(
-            "default_dns".into(),
-            serde_json::to_string(dns).unwrap_or_else(|_| "[]".into()),
-        );
-        db::update_user_config(&fields)?;
-    }
-    if let Some(ref allowed) = cfg.init_allowed_ips {
-        let mut fields = db::UpdateMap::new();
-        fields.insert(
-            "default_allowed_ips".into(),
-            serde_json::to_string(allowed).unwrap_or_else(|_| "[]".into()),
-        );
-        db::update_user_config(&fields)?;
-    }
-
-    db::set_setup_step(0)?;
-    tracing::info!("INIT_ENABLED: setup wizard completed");
     Ok(())
 }

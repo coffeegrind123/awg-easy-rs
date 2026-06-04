@@ -7,6 +7,12 @@ pub struct Config {
     pub port: u16,
     pub host: String,
     pub insecure: bool,
+    /// When true, honour `X-Forwarded-For` / `X-Real-IP` for the per-source-IP
+    /// login rate limiter. Only safe behind a trusted reverse proxy that
+    /// overwrites these headers — otherwise any client can forge them to evade
+    /// the per-IP bucket. Default false: the rate limiter uses the real peer
+    /// socket address instead.
+    pub trust_proxy: bool,
     pub disable_ipv6: bool,
     pub init_enabled: bool,
     pub init_username: Option<String>,
@@ -61,6 +67,7 @@ impl Config {
             .unwrap_or(51821);
         let host = get_env("HOST", "0.0.0.0");
         let insecure = get_env("INSECURE", "false").to_lowercase() == "true";
+        let trust_proxy = get_env("TRUST_PROXY", "false").to_lowercase() == "true";
         let disable_ipv6 = get_env("DISABLE_IPV6", "false").to_lowercase() == "true";
         let init_enabled = get_env("INIT_ENABLED", "false").to_lowercase() == "true";
 
@@ -111,6 +118,7 @@ impl Config {
             port,
             host,
             insecure,
+            trust_proxy,
             disable_ipv6,
             init_enabled,
             init_username,

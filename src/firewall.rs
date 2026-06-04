@@ -218,6 +218,15 @@ pub fn remove_filtering(iface: &str) -> Result<()> {
 /// DNS lockdown is rebuilt **first** so that even when the per-peer
 /// firewall is disabled (`firewall_enabled = false`) the lockdown still
 /// applies — the two settings are independent.
+/// `spawn_blocking` wrapper around [`rebuild_rules`]. `nft -f -` is a
+/// subprocess invocation; offloading it keeps async handlers from parking a
+/// tokio worker on the firewall rebuild.
+pub async fn rebuild_rules_async() -> Result<()> {
+    tokio::task::spawn_blocking(rebuild_rules)
+        .await
+        .map_err(|e| anyhow!("blocking task failed: {e}"))?
+}
+
 pub fn rebuild_rules() -> Result<()> {
     let iface = crate::db::get_interface()?;
     let enable_ipv6 = !crate::config::CONFIG.disable_ipv6;
@@ -365,7 +374,7 @@ fn ensure_dns_chains(iface: &str, block_external: bool) -> Result<()> {
         // Make sure no stale jump points at a chain we won't populate;
         // delete_dns_filter_jump is best-effort so this is safe even
         // when the jump never existed.
-        let _ = delete_dns_filter_jump(&iface);
+        delete_dns_filter_jump(&iface);
         return Ok(());
     }
 

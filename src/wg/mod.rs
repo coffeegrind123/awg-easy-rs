@@ -126,6 +126,37 @@ pub fn dump_peers(iface_name: &str) -> Result<Vec<cli::PeerDump>> {
     cli::awg_dump(iface_name)
 }
 
+// ---------------------------------------------------------------------------
+// Async offload wrappers
+// ---------------------------------------------------------------------------
+//
+// `save_config`, `dump_peers`, and `restart` shell out to `awg`/`awg-quick`
+// (and write the config file), which can take hundreds of milliseconds. These
+// wrappers run that work on `spawn_blocking` so an async request handler never
+// parks a tokio worker thread on a subprocess. The in-process SQLite layer is
+// deliberately left synchronous: it's a single global connection behind a
+// `Mutex`, so offloading individual queries would add lock churn without any
+// parallelism gain.
+
+fn join_err<T>(r: std::result::Result<Result<T>, tokio::task::JoinError>) -> Result<T> {
+    r.map_err(|e| anyhow::anyhow!("blocking task failed: {e}"))?
+}
+
+/// `spawn_blocking` wrapper around [`save_config`].
+pub async fn save_config_async() -> Result<()> {
+    join_err(tokio::task::spawn_blocking(save_config).await)
+}
+
+/// `spawn_blocking` wrapper around [`dump_peers`].
+pub async fn dump_peers_async(iface_name: String) -> Result<Vec<cli::PeerDump>> {
+    join_err(tokio::task::spawn_blocking(move || dump_peers(&iface_name)).await)
+}
+
+/// `spawn_blocking` wrapper around [`restart`].
+pub async fn restart_async() -> Result<()> {
+    join_err(tokio::task::spawn_blocking(restart).await)
+}
+
 /// Background cron job — expire clients.
 pub fn cron_job() -> Result<()> {
     let clients = crate::db::get_all_clients()?;

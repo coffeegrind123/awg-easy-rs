@@ -361,7 +361,7 @@ async fn login_with_invalid_totp_code() {
     let (status, body, _) = login(&app, "totpuser", "pass", Some("000000")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     // check_current should return false for 000000
-    assert!(body["error"].as_str().map_or(false, |e| e.contains("TOTP")));
+    assert!(body["error"].as_str().is_some_and(|e| e.contains("TOTP")));
 }
 
 // ---------------------------------------------------------------------------

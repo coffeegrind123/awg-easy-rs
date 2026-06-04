@@ -49,7 +49,7 @@ pub fn validate_key(key: &str) -> Result<()> {
             k.len()
         ));
     }
-    if k.len() % 2 != 0 {
+    if !k.len().is_multiple_of(2) {
         return Err(anyhow!(
             "encryption key must have an even number of hex characters (got {})",
             k.len()

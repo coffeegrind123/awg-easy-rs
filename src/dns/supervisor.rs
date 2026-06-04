@@ -21,8 +21,8 @@
 
 #![cfg(dns_bundled)]
 
-use std::io;
-use std::path::PathBuf;
+use crate::proc::{pid_alive, restart_backoff, send_signal};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -357,7 +357,7 @@ fn should_tor_remain_disabled(bundle: &db::DnsBundle) -> Option<String> {
     None
 }
 
-async fn write_tor_config(bundle: &db::DnsBundle, bin_dir: &PathBuf) -> Result<PathBuf> {
+async fn write_tor_config(bundle: &db::DnsBundle, bin_dir: &Path) -> Result<PathBuf> {
     let dir = PathBuf::from(&CONFIG.dns_dir);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -491,27 +491,6 @@ async fn stop_if_running(kind: ChildKind, reason: &str) {
     tracing::error!(kind = kind.name(), pid, "child failed to exit even after SIGKILL");
 }
 
-fn pid_alive(pid: u32) -> bool {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    let err = io::Error::last_os_error();
-    err.raw_os_error() == Some(libc::EPERM)
-}
-
-fn send_signal(pid: u32, signum: libc::c_int) -> io::Result<()> {
-    // SAFETY: kill(2) is async-signal-safe and accepts an arbitrary
-    // pid_t — passing a non-existent PID returns ESRCH, which we
-    // surface via io::Error rather than panicking.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, signum) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
 fn spawn_watchdog(kind: ChildKind, mut child: Child, shutdown_requested: Arc<AtomicBool>) {
     tokio::spawn(async move {
         let pid = child.id().unwrap_or(0);
@@ -604,7 +583,7 @@ fn spawn_watchdog(kind: ChildKind, mut child: Child, shutdown_requested: Arc<Ato
             );
             return;
         }
-        let backoff = Duration::from_secs((1u64 << (attempts.min(6) - 1)).min(60));
+        let backoff = restart_backoff(attempts);
         tracing::info!(
             kind = kind.name(),
             attempts,

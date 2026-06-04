@@ -1303,6 +1303,12 @@ async fn new_client_defaults_to_advanced_security_auto() {
 #[serial(db)]
 async fn admin_can_toggle_advanced_security_off() {
     seed();
+    // Setting advancedSecurity = on|off is gated on the kernel module being
+    // loaded. CI runners (and this dev host) never have it, so pin Kernel
+    // mode for this test. `#[serial(db)]` keeps the override from racing
+    // other tests; restore it before returning.
+    use awg_easy_rs::wg::kernel::{set_mode_override, GamingMode};
+    set_mode_override(Some(GamingMode::Kernel));
     let admin_id = create_user("admin", "adminpass", 1);
     let cid = create_client(Some(admin_id), "p1", "10.8.0.10");
     let app = router();
@@ -1310,6 +1316,7 @@ async fn admin_can_toggle_advanced_security_off() {
 
     let body = json!({ "advancedSecurity": false });
     let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    set_mode_override(None);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(db::get_client(cid).unwrap().advanced_security, Some(false));
 }
@@ -1422,13 +1429,111 @@ async fn client_config_always_marks_server_as_advanced() {
 // Helper for the server-config emit test above. Pulls the [Peer] block
 // belonging to the client with the given id.
 fn extract_block(server_cfg: &str, id: i64) -> String {
-    let header = format!("# Client: ");
+    let header = "# Client: ".to_string();
     let id_marker = format!("({id})");
-    let mut iter = server_cfg.split("\n\n");
-    while let Some(block) = iter.next() {
+    for block in server_cfg.split("\n\n") {
         if block.starts_with(&header) && block.contains(&id_marker) {
             return block.to_string();
         }
     }
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Routing / firewall / DNS list validation (nft + config injection guard)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(db)]
+async fn rejects_injection_in_allowed_ips() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "allowedIps": ["1.2.3.4 accept; add rule inet x y"] });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn rejects_invalid_firewall_ips() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "firewallIps": ["8.8.8.8:99999"] });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn rejects_non_ip_dns_entry() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({ "dns": ["not-an-ip"] });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn accepts_valid_routing_lists() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "c", "10.8.0.10");
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    let body = json!({
+        "allowedIps": ["0.0.0.0/0", "::/0"],
+        "firewallIps": ["8.8.8.8:53/udp", "1.1.1.1"],
+        "dns": ["1.1.1.1", "9.9.9.9"]
+    });
+    let (status, _) = post(&app, &format!("/api/client/{cid}"), &cookie, &body).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn rejects_magic_header_newline_injection() {
+    seed();
+    create_user("admin", "adminpass", 1);
+    let app = router();
+    let cookie = login_get_cookie(&app, "admin", "adminpass").await;
+
+    // A newline in H1 would inject an arbitrary `[Interface]` directive.
+    let body = json!({ "h1": "5\nPostUp = id" });
+    let (status, _) = post(&app, "/api/admin/interface", &cookie, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn cron_disables_expired_client() {
+    seed();
+    let admin_id = create_user("admin", "adminpass", 1);
+    let cid = create_client(Some(admin_id), "exp", "10.8.0.10");
+
+    // Stamp an expiry one hour in the past, then run the expiry cron.
+    let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let mut f = db::UpdateMap::new();
+    f.insert("expires_at".into(), past);
+    db::update_client(cid, &f).unwrap();
+    assert!(db::get_client(cid).unwrap().enabled);
+
+    awg_easy_rs::wg::cron_job().unwrap();
+    assert!(
+        !db::get_client(cid).unwrap().enabled,
+        "expired client should be disabled by the cron"
+    );
 }
