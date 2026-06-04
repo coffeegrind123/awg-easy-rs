@@ -398,6 +398,7 @@ mod tests {
     #[cfg(xray_bundled)]
     #[tokio::test]
     #[serial_test::serial(xray_e2e_env)]
+    #[ignore = "spawns real xray subprocess + writes CONFIG.xray_dir; run with --ignored"]
     async fn xray_validates_generated_config() {
         // Use a Reality keypair that's known-good (fresh from `xray x25519`).
         let inbound = db::XrayInbound {
@@ -459,6 +460,7 @@ mod tests {
     #[cfg(xray_bundled)]
     #[tokio::test]
     #[serial_test::serial(xray_e2e_env)]
+    #[ignore = "spawns real xray subprocess + writes CONFIG.xray_dir; run with --ignored"]
     async fn xray_validates_xhttp_config() {
         let inbound = db::XrayInbound {
             private_key: "WNBaVNH48CG9SumFGQPEVCs1oSoZWS_hbclKHISa3ng".into(),

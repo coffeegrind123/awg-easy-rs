@@ -250,6 +250,7 @@ Hash32: kKpGT8TO6gx4yAy_viz6-kU-uCIjGN3TzJJArIx_EEA
     #[cfg(xray_bundled)]
     #[tokio::test]
     #[serial_test::serial(xray_e2e_env)]
+    #[ignore = "spawns real xray subprocess + writes CONFIG.xray_dir; run with --ignored"]
     async fn end_to_end_x25519_against_bundled_binary() {
         // Use a unique XRAY_DIR so we don't fight other tests.
         let dir = format!(
