@@ -18,39 +18,7 @@ permissions:
   contents: write
 
 jobs:
-  # Quality gate: clippy (warnings are errors) and the full test suite. Runs on
-  # the host toolchain (no musl target / vendor blobs needed — the bundled-
-  # binary subsystems are cfg-gated off without the blobs, and the tests that
-  # require them are `#[ignore]`d). `build` depends on this, so a red test or a
-  # clippy warning blocks the release.
-  #
-  # Note: no `cargo fmt --check` gate. This codebase intentionally hand-aligns
-  # several declarations (struct-literal tables, multi-arg signatures) in a way
-  # stable rustfmt would undo, so a formatting gate would fight the house style.
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: test-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            test-cargo-${{ runner.os }}-
-
-      - name: clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: test
-        run: cargo test --all-targets
-
   build:
-    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -58,12 +26,13 @@ jobs:
 
       # Rustup ships with the runner; we just need the musl target +
       # musl-tools (provides the musl-gcc linker our RUSTFLAGS asks
-      # for). Toolchain version follows the runner's pre-installed
-      # stable Rust — pin via rust-toolchain.toml if reproducibility
-      # across versions becomes important.
-      - name: Install Rust musl target + musl-tools
+      # for) and the clippy component for the quality gate. Toolchain
+      # version follows the runner's pre-installed stable Rust — pin via
+      # rust-toolchain.toml if reproducibility across versions matters.
+      - name: Install Rust musl target + clippy + musl-tools
         run: |
           rustup target add x86_64-unknown-linux-musl
+          rustup component add clippy
           sudo apt-get update -qq
           sudo apt-get install -y -qq musl-tools
 
@@ -93,8 +62,33 @@ jobs:
           path: vendor/*.gz
           key: vendor-${{ runner.os }}-${{ hashFiles('vendor/XRAY_VERSION', 'vendor/DNS_BUNDLE_VERSION', 'vendor/TELEMT_VERSION') }}
 
-      - name: Materialise vendor/*.gz + cargo build (musl-static)
-        run: bash scripts/build.sh
+      # Materialise the vendored binary blobs first (xray/telemt/mdnsvpn/
+      # dnscrypt/tor/PTs). The quality gate and tests below must run with the
+      # blobs present: build.rs flips the `*_bundled` cfgs and bakes the
+      # per-binary version/SHA constants from them, and several unit tests
+      # assert that pin/blob coherence. Without the blobs those subsystems
+      # compile out and the consistency tests fail — so this is not a
+      # blob-free job.
+      - name: Materialise vendor/*.gz
+        run: bash scripts/build.sh --vendor-only
+
+      # Quality gate. A clippy warning or a failing test aborts the job here,
+      # before the musl release build and before the tag/release steps — so a
+      # regression can never ship. Runs against the host target (debug); the
+      # shippable artifact is the separate musl build below.
+      #
+      # No `cargo fmt --check` gate: this codebase intentionally hand-aligns
+      # several declarations (struct-literal tables, multi-arg signatures) in a
+      # way stable rustfmt would undo, so a formatting gate would fight the
+      # house style.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Cargo build (musl-static release)
+        run: bash scripts/build.sh --cargo-only
 
       # Inputs for the rest of the steps. `tag` is the canonical
       # version string for this release; `short_hash` is the rev for

@@ -417,13 +417,11 @@ pub async fn update_user(
     let _admin = require_admin(&jar, &state)?;
 
     let mut fields = db::UpdateMap::new();
-    // These are only consumed by the live-PATCH branch under
-    // cfg(telemt_bundled); without that cfg the compiler can prove
-    // the write is dead. Allow the unused warning rather than
-    // duplicating the parse block under another cfg gate.
-    #[allow(unused_assignments)]
+    // new_ad_tag / new_enabled feed the live telemt PATCH below; both the
+    // bindings and their assignments only exist when that branch is compiled.
+    #[cfg(telemt_bundled)]
     let mut new_ad_tag: Option<Option<String>> = None;
-    #[allow(unused_assignments)]
+    #[cfg(telemt_bundled)]
     let mut new_enabled: Option<bool> = None;
 
     if let Value::Object(map) = &body {
@@ -445,11 +443,17 @@ pub async fn update_user(
                 "ad_tag".into(),
                 parsed.clone().unwrap_or_default(), // empty string maps to NULL via UpdateMap? actually maps to "" — telemt treats "" as no-tag
             );
-            new_ad_tag = Some(parsed);
+            #[cfg(telemt_bundled)]
+            {
+                new_ad_tag = Some(parsed);
+            }
         }
         if let Some(v) = map.get("enabled").and_then(|v| v.as_bool()) {
             fields.insert("enabled".into(), if v { "1".into() } else { "0".into() });
-            new_enabled = Some(v);
+            #[cfg(telemt_bundled)]
+            {
+                new_enabled = Some(v);
+            }
         }
         if let Some(v) = map.get("userId") {
             if let Some(s) = value_to_string(v) {

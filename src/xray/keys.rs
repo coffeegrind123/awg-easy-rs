@@ -6,10 +6,22 @@
 //! parallel Rust implementation. UUIDs and short-IDs are generated locally
 //! since `OsRng` is the same source `xray uuid` would use anyway.
 
-use std::process::Stdio;
-
-use anyhow::{anyhow, Context, Result};
 use rand::Rng;
+
+// anyhow/Result are only used by the x25519 keypair path (the bundled-binary
+// shell-out and its parser/tests); the local UUID/short-id/path generators
+// below are infallible. Gate the import so a non-bundled, non-test build
+// doesn't see it as unused.
+#[cfg(any(xray_bundled, test))]
+use anyhow::{anyhow, Result};
+
+// These are only used by `generate_x25519`, which shells out to the bundled
+// Xray binary and therefore only exists when `xray_bundled` is set.
+#[cfg(xray_bundled)]
+use anyhow::Context;
+#[cfg(xray_bundled)]
+use std::process::Stdio;
+#[cfg(xray_bundled)]
 use tokio::process::Command;
 
 #[cfg(xray_bundled)]
@@ -66,7 +78,10 @@ pub async fn generate_x25519() -> Result<RealityKeypair> {
 }
 
 /// Pure-string parser split out so it can be unit-tested without a
-/// running Xray binary.
+/// running Xray binary. Compiled only when the bundled Xray exists (its sole
+/// non-test caller is `generate_x25519`) or under `cfg(test)` for the parser
+/// unit tests.
+#[cfg(any(xray_bundled, test))]
 fn parse_x25519_output(stdout: &str) -> Result<RealityKeypair> {
     let mut private_key: Option<String> = None;
     let mut public_key: Option<String> = None;
@@ -98,6 +113,7 @@ fn parse_x25519_output(stdout: &str) -> Result<RealityKeypair> {
     })
 }
 
+#[cfg(any(xray_bundled, test))]
 fn strip_label<'a>(line: &'a str, labels: &[&str]) -> Option<&'a str> {
     for label in labels {
         if let Some(rest) = line.strip_prefix(label) {
