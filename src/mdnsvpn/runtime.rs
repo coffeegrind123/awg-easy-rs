@@ -32,6 +32,11 @@ const MDNSVPN_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mdnsvpn.gz")
 /// repeatedly — the function short-circuits when the existing file
 /// already hashes to `MDNSVPN_SHA256`.
 pub fn extract_bundled_binary() -> Result<PathBuf> {
+    // In-memory mode: exec MasterDnsVPN from an anonymous memfd, never disk.
+    if CONFIG.in_memory {
+        return crate::memexec::load("mdnsvpn", MDNSVPN_GZ, MDNSVPN_SHA256);
+    }
+
     let dir = PathBuf::from(&CONFIG.mdnsvpn_dir);
     fs::create_dir_all(&dir)
         .with_context(|| format!("create mdnsvpn runtime dir {}", dir.display()))?;

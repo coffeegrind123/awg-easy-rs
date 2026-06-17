@@ -1,13 +1,29 @@
+# Runs entirely in RAM (IN_MEMORY=true, baked into the image):
+#  - /etc/wireguard is a tmpfs, so the SQLite WAL siblings (unused in memory
+#    mode), generated subprocess configs, the AmneziaWG .conf, tor's data dir,
+#    and the extracted PT plugins all live in RAM.
+#  - The bundled subprocess ELFs are exec'd from anonymous memfds (no FS entry).
+#  - The ONLY durable touch point is the periodic DB snapshot under /data, kept
+#    on a tiny persistent volume so a planned restart restores the full roster.
+#    A failing disk degrades this to "no fresh snapshot" — it never stalls or
+#    crashes the data plane.
 volumes:
-  etc_wireguard:
+  awg_data:
 
 services:
   awg-easy:
     build: .
     container_name: awg-easy
     volumes:
-      - etc_wireguard:/etc/wireguard
+      # Durable, RAM-independent: only the DB snapshot lands here.
+      - awg_data:/data
       - /lib/modules:/lib/modules:ro
+    tmpfs:
+      # RAM-backed runtime root. Sized for the generated configs, tor's data
+      # directory, and the on-disk PT plugins (lyrebird/snowflake/webtunnel,
+      # only materialised when a tor pluggable transport is enabled). mode=0700
+      # because it holds the generated AmneziaWG .conf and subprocess configs.
+      - /etc/wireguard:rw,size=256m,mode=0700
     ports:
       - "51820:51820/udp"
       - "51821:51821/tcp"
@@ -26,6 +42,13 @@ services:
     environment:
       - PORT=51821
       - HOST=0.0.0.0
+      # In-memory mode (also the image default). Set IN_MEMORY=false to fall
+      # back to a durable on-disk database under /etc/wireguard.
+      - IN_MEMORY=true
+      - WG_EASY_PERSIST_DB=/data/wg-easy.db
+      # Seconds between RAM→disk snapshots. 0 disables periodic snapshots
+      # (shutdown still snapshots). Raise it to write the disk less often.
+      - WG_EASY_PERSIST_INTERVAL=30
       # Uncomment for automatic initial setup:
       # - INIT_ENABLED=true
       # - INIT_USERNAME=admin

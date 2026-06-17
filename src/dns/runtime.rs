@@ -118,6 +118,27 @@ pub fn extract(name: &str) -> Result<PathBuf> {
     Ok(bin_dir.join(bin.name))
 }
 
+/// Resolve a path the supervisor can `exec` for a binary it launches
+/// *itself* — `dnscrypt-proxy` and `tor`. In `IN_MEMORY` mode the ELF is
+/// loaded into an anonymous memfd (never disk); otherwise it is extracted
+/// to `<dns_dir>/bin/` as before.
+///
+/// This is deliberately **not** used for tor's pluggable-transport
+/// plugins (`lyrebird` / `snowflake` / `webtunnel`): tor `exec`s those by
+/// the path written into the torrc, and a memfd lives only in *our*
+/// descriptor table, so PT plugins must always be materialised on the
+/// (tmpfs) filesystem via [`extract`].
+pub fn resolve_exec(name: &str) -> Result<PathBuf> {
+    if CONFIG.in_memory {
+        let bin = BINARIES
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| anyhow!("unknown bundled binary {name:?}"))?;
+        return crate::memexec::load(bin.name, bin.gz, bin.sha256);
+    }
+    extract(name)
+}
+
 /// Path operators should set in `dns_dir` config — exposed so the
 /// supervisor can build absolute paths without re-deriving from CONFIG
 /// every call.

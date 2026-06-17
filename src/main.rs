@@ -27,6 +27,29 @@ async fn main() -> anyhow::Result<()> {
     db::init_db()?;
     tracing::info!("Database initialized");
 
+    // In-memory mode promises "entirely in RAM". The DB and the bundled
+    // binaries honour that on their own (`:memory:` + memfd), but the
+    // generated configs, the AmneziaWG `.conf`, and tor's data directory
+    // still live under the runtime dirs — so those must be on a tmpfs for
+    // the promise to hold. Warn (don't fail) when they aren't: a misconfig
+    // here silently reintroduces the disk dependency the operator is trying
+    // to escape.
+    if config::CONFIG.in_memory {
+        match awg_easy_rs::memexec::is_ram_backed(&config::CONFIG.wg_conf_dir) {
+            Some(true) => tracing::info!(
+                "IN_MEMORY: runtime dir {} is tmpfs (RAM-backed)",
+                config::CONFIG.wg_conf_dir
+            ),
+            Some(false) => tracing::warn!(
+                "IN_MEMORY is set but the runtime dir {} is NOT tmpfs — config \
+                 files, the AmneziaWG .conf, and tor's data dir will still hit \
+                 disk. Mount it as tmpfs (the bundled docker-compose does).",
+                config::CONFIG.wg_conf_dir
+            ),
+            None => {}
+        }
+    }
+
     if let Err(e) = run_init_setup() {
         tracing::warn!("INIT_ENABLED auto-setup failed (non-fatal): {e}");
     }
@@ -90,6 +113,41 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app_state = api::AppState::new();
+
+    // In-memory mode with a configured durable path: snapshot the RAM
+    // database to disk on a fixed cadence so a planned restart restores the
+    // full roster. Runs on `spawn_blocking` (rusqlite + disk I/O are sync)
+    // and swallows every error — a dying NVMe degrades us to "no fresh
+    // snapshot", never to a stalled or crashed data plane. Periodic
+    // snapshots are skipped when the interval is 0; shutdown still snapshots.
+    if config::CONFIG.in_memory {
+        if let Some(path) = config::CONFIG.persist_db_path.clone() {
+            let interval = config::CONFIG.persist_interval_secs;
+            if interval > 0 {
+                tokio::spawn(async move {
+                    let mut tick =
+                        tokio::time::interval(std::time::Duration::from_secs(interval));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // First tick fires immediately — skip it so we don't
+                    // snapshot the just-restored DB redundantly at boot.
+                    tick.tick().await;
+                    loop {
+                        tick.tick().await;
+                        let p = path.clone();
+                        match tokio::task::spawn_blocking(move || db::snapshot_to(&p)).await {
+                            Ok(Ok(())) => tracing::debug!("DB snapshot written to {path}"),
+                            Ok(Err(e)) => tracing::warn!("DB snapshot failed (non-fatal): {e:#}"),
+                            Err(e) => tracing::warn!("DB snapshot task join error: {e}"),
+                        }
+                    }
+                });
+                tracing::info!(
+                    "In-memory DB snapshots every {interval}s → {}",
+                    config::CONFIG.persist_db_path.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
 
     // Start background cron job (every 60 seconds): expire clients/one-time
     // links and sweep expired sessions out of the in-memory store.
@@ -188,6 +246,19 @@ async fn main() -> anyhow::Result<()> {
             !config::CONFIG.disable_ipv6,
         );
     }
+
+    // Final durable snapshot on graceful shutdown so a clean stop never
+    // loses the work done since the last periodic snapshot. Best-effort —
+    // a failure here must not turn a clean shutdown into a non-zero exit.
+    if config::CONFIG.in_memory {
+        if let Some(path) = config::CONFIG.persist_db_path.as_deref() {
+            match db::snapshot_to(path) {
+                Ok(()) => tracing::info!("Final DB snapshot written to {path}"),
+                Err(e) => tracing::warn!("Final DB snapshot failed (non-fatal): {e:#}"),
+            }
+        }
+    }
+
     tracing::info!("awg-easy-rs exited cleanly");
     Ok(())
 }

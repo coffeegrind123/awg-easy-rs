@@ -94,6 +94,26 @@ ENV HOST=0.0.0.0
 ENV INSECURE=false
 ENV DISABLE_IPV6=false
 
+# Run entirely in RAM by default (the operator asked for the WireGuard-style
+# "data plane never depends on a healthy disk" property):
+#  - IN_MEMORY=true        → SQLite opens :memory:; bundled subprocess ELFs
+#                            (Xray/telemt/MasterDnsVPN/dnscrypt-proxy/tor) are
+#                            exec'd from anonymous memfds, never written to a
+#                            filesystem.
+#  - WG_EASY_PERSIST_DB    → the only durable touch point: the RAM database is
+#                            snapshotted here (and restored on boot) so a
+#                            planned restart keeps the full client roster. Put
+#                            it on a small persistent volume (see compose).
+#  - /etc/wireguard is a tmpfs (see compose) so the generated configs, the
+#    AmneziaWG .conf, and tor's data dir live in RAM too.
+ENV IN_MEMORY=true
+ENV WG_EASY_PERSIST_DB=/data/wg-easy.db
+ENV WG_EASY_PERSIST_INTERVAL=30
+
+# Durable snapshot target (a volume is mounted here by compose). Created so
+# the snapshot rename has a directory to land in even before the volume mount.
+RUN mkdir -p /data
+
 EXPOSE 51821/tcp
 EXPOSE 51820/udp
 

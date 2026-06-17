@@ -10,6 +10,7 @@ pub mod db;
 pub mod dns;
 pub mod firewall;
 pub mod init_setup;
+pub mod memexec;
 pub mod mdnsvpn;
 pub mod mtproxy;
 pub mod proc;

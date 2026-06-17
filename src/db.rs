@@ -1675,6 +1675,10 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
 /// Open the database, create tables, seed defaults, and install the global
 /// handle.  Must be called once at startup.
 pub fn init_db() -> Result<()> {
+    if CONFIG.in_memory {
+        return init_in_memory_db();
+    }
+
     let c = Connection::open(&CONFIG.db_path).context("Failed to open SQLite database")?;
     // The DB holds service private keys, MTProxy secrets, the MasterDnsVPN
     // encryption key, and password/TOTP material. Restrict it to the owner so
@@ -1695,6 +1699,114 @@ pub fn init_db() -> Result<()> {
     let mut guard = db_slot().lock().expect("Database lock poisoned");
     *guard = Some(c);
     tracing::info!("Database ready at {}", CONFIG.db_path);
+    Ok(())
+}
+
+/// Open the database purely in RAM (`:memory:`) so no query ever touches a
+/// block device. When `WG_EASY_PERSIST_DB` is set and a snapshot already
+/// exists there, the RAM database is seeded from it via SQLite's online
+/// restore — that is the only time the durable file is read, and it happens
+/// before the server starts serving. Schema migrations then run against the
+/// restored data (idempotent), and seeding fills a genuinely empty database.
+///
+/// A snapshot that is missing, empty, or unreadable is not fatal: we log and
+/// fall through to a fresh seeded database. This mirrors the operator's
+/// premise — the data plane must come up from RAM regardless of disk health.
+fn init_in_memory_db() -> Result<()> {
+    let mut c = Connection::open_in_memory().context("open in-memory SQLite database")?;
+
+    let restored = match &CONFIG.persist_db_path {
+        Some(path) if snapshot_is_restorable(path) => match restore_from(&mut c, path) {
+            Ok(()) => {
+                tracing::info!("Restored in-memory database from snapshot {path}");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Snapshot {path} exists but could not be restored ({e:#}); \
+                     starting from a fresh database"
+                );
+                false
+            }
+        },
+        _ => false,
+    };
+
+    // Always (re)run schema creation + migrations: harmless on a fresh DB,
+    // and it upgrades the schema of an older restored snapshot in place.
+    create_tables(&c)?;
+    // Only seed when nothing was restored — a restored snapshot already holds
+    // the operator's interface/general rows and must not be clobbered.
+    if !restored {
+        seed_if_empty(&c)?;
+    }
+
+    let mut guard = db_slot().lock().expect("Database lock poisoned");
+    *guard = Some(c);
+    match &CONFIG.persist_db_path {
+        Some(path) => tracing::info!(
+            "Database ready in RAM (in-memory mode); snapshots persist to {path}"
+        ),
+        None => tracing::info!(
+            "Database ready in RAM (in-memory mode); no persistence configured \
+             (WG_EASY_PERSIST_DB unset) — state is lost on restart"
+        ),
+    }
+    Ok(())
+}
+
+/// True when `path` names a non-empty regular file — i.e. a snapshot worth
+/// attempting to restore. An absent or zero-byte file is the "first boot"
+/// case and is not an error.
+fn snapshot_is_restorable(path: &str) -> bool {
+    std::fs::metadata(path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+}
+
+/// Restore a durable on-disk snapshot into the live in-memory connection
+/// using SQLite's online backup (restore) API. The source file is opened
+/// read-only-ish and copied page-by-page into `dst`; `dst`'s prior contents
+/// are replaced.
+fn restore_from(dst: &mut Connection, src_path: &str) -> Result<()> {
+    let src = Connection::open(src_path)
+        .with_context(|| format!("open snapshot {src_path} for restore"))?;
+    let backup = rusqlite::backup::Backup::new(&src, dst)
+        .context("init restore backup handle")?;
+    backup
+        .run_to_completion(64, std::time::Duration::from_millis(0), None)
+        .context("run restore to completion")?;
+    Ok(())
+}
+
+/// Snapshot the live (RAM) database to a durable file, atomically.
+///
+/// Used by the background persistence task and by graceful shutdown. The
+/// backup is written to a sibling temp file and renamed into place so a crash
+/// mid-snapshot can never truncate the previous good snapshot. Holds the
+/// global connection lock only for the duration of the page copy — for an
+/// academy-sized roster (tens of thousands of rows) that is a few-MB,
+/// sub-100ms copy, and the lock is contended only by admin API calls, never
+/// by the WireGuard data plane.
+///
+/// Every failure mode (no persist path, unwritable directory, dying disk) is
+/// surfaced as an `Err` for the caller to log-and-swallow — it must never
+/// propagate into a panic or block the server.
+pub fn snapshot_to(dst_path: &str) -> Result<()> {
+    let tmp = format!("{dst_path}.partial");
+    {
+        let guard = conn();
+        guard
+            .backup(rusqlite::DatabaseName::Main, &tmp, None)
+            .with_context(|| format!("online-backup database to {tmp}"))?;
+    }
+    // chmod 0600 before promoting — the snapshot holds the same secrets as
+    // the live DB. Best-effort.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, dst_path)
+        .with_context(|| format!("promote snapshot {tmp} → {dst_path}"))?;
     Ok(())
 }
 
@@ -2766,5 +2878,59 @@ mod migration_tests {
 
         apply_migrations(&conn).expect("apply_migrations re-adds column");
         assert!(column_exists(&conn, "clients_table", "advanced_security").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    /// The whole point of in-memory mode's durability story: a RAM database
+    /// can be snapshotted to a file and that file restored into a fresh RAM
+    /// database with no data loss. We drive the same online-backup API
+    /// `snapshot_to` / `restore_from` use, side-stepping the global DB slot
+    /// so the test is hermetic.
+    #[test]
+    fn snapshot_then_restore_preserves_data() {
+        // Source RAM DB with schema + a sentinel mutation.
+        let src = Connection::open_in_memory().expect("open src");
+        create_tables(&src).expect("create_tables src");
+        seed_if_empty(&src).expect("seed src");
+        src.execute("UPDATE general_table SET session_timeout = 4242", [])
+            .expect("mutate src");
+
+        // Persist it to a durable file via SQLite online backup.
+        let tmp = std::env::temp_dir().join(format!(
+            "awg-snap-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        src.backup(rusqlite::DatabaseName::Main, &tmp, None)
+            .expect("backup to file");
+
+        // Restore into an empty RAM DB and confirm the sentinel survived.
+        let mut dst = Connection::open_in_memory().expect("open dst");
+        restore_from(&mut dst, tmp.to_str().unwrap()).expect("restore");
+        let timeout: i64 = dst
+            .query_row("SELECT session_timeout FROM general_table", [], |r| r.get(0))
+            .expect("read restored value");
+        assert_eq!(timeout, 4242, "restored DB must carry the snapshot's data");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A missing or empty snapshot is the first-boot case, not an error —
+    /// `snapshot_is_restorable` must report it as "nothing to restore".
+    #[test]
+    fn missing_or_empty_snapshot_is_not_restorable() {
+        assert!(!snapshot_is_restorable("/no/such/awg-snapshot.db"));
+
+        let empty = std::env::temp_dir().join(format!("awg-empty-{}.db", std::process::id()));
+        std::fs::write(&empty, b"").expect("write empty file");
+        assert!(!snapshot_is_restorable(empty.to_str().unwrap()));
+        let _ = std::fs::remove_file(&empty);
     }
 }

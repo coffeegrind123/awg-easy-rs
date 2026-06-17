@@ -31,6 +31,11 @@ const TELEMT_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/telemt.gz"));
 /// repeatedly — the function short-circuits when the existing file
 /// already hashes to `TELEMT_SHA256`.
 pub fn extract_bundled_binary() -> Result<PathBuf> {
+    // In-memory mode: exec telemt from an anonymous memfd, never disk.
+    if CONFIG.in_memory {
+        return crate::memexec::load("telemt", TELEMT_GZ, TELEMT_SHA256);
+    }
+
     let dir = PathBuf::from(&CONFIG.mtproxy_dir);
     fs::create_dir_all(&dir)
         .with_context(|| format!("create mtproxy runtime dir {}", dir.display()))?;

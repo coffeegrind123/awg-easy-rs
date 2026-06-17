@@ -35,6 +35,7 @@ Four transports + an optional bundled resolver, all sharing one admin UI, user a
 | **Per-client firewall** | Native nftables `wg-clients` chain inside the `inet awg-easy-rs` table. `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild via a single `nft -f -` transaction. (AmneziaWG side only; Xray, telemt, and MasterDnsVPN multiplex through one socket each, so per-peer L3/L4 filtering doesn't compose with VLESS UUIDs / MTProxy secrets / DNS-tunnel envelopes.) |
 | **Metrics** | `/metrics/json` and `/metrics/prometheus`, gated by hashed Bearer token (when `metricsPassword` is set). Exposes per-peer rx/tx, last-handshake, online state. |
 | **Operational** | Background cron expires clients/one-time-links every 60 s. `/health` endpoint (always 200). Persistent SQLite (WAL mode, foreign keys on). Idempotent schema migrations. |
+| **Run-in-RAM mode** | `IN_MEMORY=true` (default in the Docker image): `:memory:` SQLite + every bundled subprocess ELF exec'd from an anonymous, sealed `memfd` — nothing on the request path or `exec` path touches disk. Optional async snapshot/restore (`WG_EASY_PERSIST_DB`) keeps the roster across restarts without ever blocking the data plane on a failing disk. See [Run entirely in memory](#run-entirely-in-memory). |
 
 ---
 
@@ -95,6 +96,22 @@ All configuration is via environment variables.
 | `WG_EASY_MTPROXY_DIR` | `<WG_EASY_CONF_DIR>/mtproxy` | Where the bundled `telemt` ELF is extracted, plus the generated `config.toml`, telemt's PID file, and the `tlsfront` cache (real TLS records fetched from the masking domain). Persist on a docker volume to avoid re-extraction + tlsfront rebuilds across restarts. |
 | `WG_EASY_DNS_DIR` | `<WG_EASY_CONF_DIR>/dns` | Where the bundled DNS-stack ELFs (dnscrypt-proxy, tor, lyrebird, snowflake, webtunnel) are extracted, plus generated configs (`dnscrypt-proxy.toml`, `torrc`, etc.) and tor's data directory. Persist to keep tor's onion descriptors / consensus across restarts. |
 | `WG_EASY_MDNSVPN_DIR` | `<WG_EASY_CONF_DIR>/mdnsvpn` | Where the bundled MasterDnsVPN ELF is extracted, plus the generated `server_config.toml` and the singleton `encrypt_key.txt`. Persist on a docker volume to avoid re-extraction across restarts. |
+
+### Run entirely in memory
+
+| Variable | Default | Description |
+|---|---|---|
+| `IN_MEMORY` | `true` (set `IN_MEMORY=false` to opt out) | Run with the data plane fully RAM-resident. SQLite is opened `:memory:`, and every bundled subprocess ELF (Xray, telemt, MasterDnsVPN, dnscrypt-proxy, tor) is exec'd from an anonymous `memfd_create(2)` object instead of being written to disk. No query and no `exec` touches a block device. Set `IN_MEMORY=false` for the classic durable on-disk database under `WG_EASY_DB_PATH`. |
+| `WG_EASY_PERSIST_DB` | — (`/data/wg-easy.db` in the image) | Durable snapshot file for the RAM database. Restored on boot (the only time it's read) and re-written by a background task + on graceful shutdown via SQLite's online-backup API. Unset ⇒ pure RAM, state lost on restart. Only consulted when `IN_MEMORY=true`. |
+| `WG_EASY_PERSIST_INTERVAL` | `30` | Seconds between RAM→disk snapshots. `0` disables periodic snapshots (shutdown still snapshots). |
+
+When `IN_MEMORY=true`:
+
+- **Database** — `:memory:`, so no SQLite query ever blocks on disk. If `WG_EASY_PERSIST_DB` is set, the full roster (clients, Reality keys, MTProxy secrets, the MasterDnsVPN key, accounts, 2FA) is restored from that file at boot and snapshotted back out-of-band. Every snapshot is best-effort and off the request path — a degraded or read-only disk demotes you to "no fresh snapshot", it never stalls or crashes the data plane. This is the WireGuard property the mode is built for: the service comes up and stays up from RAM regardless of disk health.
+- **Subprocess binaries** — decompressed, SHA-256-verified, and sealed (`F_SEAL_WRITE`) inside an anonymous memfd, then exec'd via `/proc/self/fd/N`. The binary has no name in any filesystem and is immutable. The memfd is cached for the process lifetime, so a crash-looping child re-`exec`s the same in-RAM image with zero re-extraction. (`XRAY_BIN_PATH` still overrides Xray with a real on-disk binary if you want to track upstream yourself.)
+- **Config files / `.conf` / tor data dir / PT plugins** — these still need real paths (tor `exec`s its lyrebird/snowflake/webtunnel plugins by the path written into `torrc`, and `awg-quick` reads `/etc/wireguard/<iface>.conf`). Mount the runtime root (`WG_EASY_CONF_DIR`, default `/etc/wireguard`) as a **tmpfs** so those live in RAM too. The bundled `docker-compose.yml` does exactly that (`tmpfs: /etc/wireguard`, durable volume only at `/data`). The server logs a warning at startup if `IN_MEMORY=true` but the runtime root isn't tmpfs.
+
+No extra Linux capabilities are required — memfd needs none, and the tmpfs is supplied by the container runtime, so the cap set stays `NET_ADMIN` + `SYS_MODULE`.
 
 ### First-run auto-setup
 

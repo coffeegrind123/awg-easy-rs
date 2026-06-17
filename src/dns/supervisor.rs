@@ -214,7 +214,7 @@ async fn reconcile_dnscrypt(bundle: &db::DnsBundle) -> Result<()> {
         state.dnscrypt.disabled_reason = None;
         return Ok(());
     }
-    let bin = runtime::extract("dnscrypt-proxy").context("extract dnscrypt-proxy")?;
+    let bin = runtime::resolve_exec("dnscrypt-proxy").context("resolve dnscrypt-proxy")?;
     let argv = vec!["-config".to_string(), path.display().to_string()];
     let child = spawn(ChildKind::Dnscrypt, &bin, argv).await?;
     let pid = child
@@ -276,12 +276,14 @@ async fn reconcile_tor(bundle: &db::DnsBundle) -> Result<()> {
         return Ok(());
     }
 
-    // Make sure all four tor-related binaries are extracted before we
-    // render the torrc — tor will exec the PT plugin path on first
-    // bridged connection. Lazy-extraction means an enabled-with-PT
-    // bundle on a fresh install doesn't fail because lyrebird wasn't
-    // there yet.
-    runtime::extract("tor").context("extract tor")?;
+    // Resolve tor itself (memfd in IN_MEMORY mode, else extracted to the
+    // tmpfs bin dir) and make sure its PT plugin is materialised on disk
+    // *before* we render the torrc — tor `exec`s the PT plugin path on
+    // the first bridged connection, and that path must be a real file
+    // (a memfd lives only in our descriptor table, not tor's). Lazy
+    // resolution means an enabled-with-PT bundle on a fresh install
+    // doesn't fail because lyrebird wasn't there yet.
+    let tor_bin = runtime::resolve_exec("tor").context("resolve tor")?;
     if !bundle.tor_plugin.is_empty() {
         if let Some(plugin_bin) = tor::plugin_binary_name(&bundle.tor_plugin) {
             runtime::extract(plugin_bin)
@@ -307,7 +309,7 @@ async fn reconcile_tor(bundle: &db::DnsBundle) -> Result<()> {
         drop(guard);
     }
 
-    let bin = bin_dir.join("tor");
+    let bin = tor_bin;
     let argv = vec![
         "-f".to_string(),
         path.display().to_string(),

@@ -14,8 +14,10 @@ axum-extra = { version = "0.9", features = ["cookie"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["cors", "fs", "auth"] }
 
-# Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Database. `backup` enables the SQLite online-backup API used by the
+# in-memory mode to snapshot the RAM database to a durable file and to
+# restore it on boot, without ever blocking the request path.
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

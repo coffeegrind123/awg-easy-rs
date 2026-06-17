@@ -35,6 +35,10 @@ const XRAY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/xray.gz"));
 /// Resolve the path the supervisor should `exec`. Falls back to the
 /// bundled binary unless `XRAY_BIN_PATH` is set, in which case we trust
 /// the operator's binary verbatim.
+///
+/// In `IN_MEMORY` mode the bundled binary is exec'd from an anonymous
+/// memfd (see [`crate::memexec`]) and never touches disk; an operator
+/// `XRAY_BIN_PATH` override is still honoured verbatim as a real path.
 pub fn resolve_binary() -> Result<PathBuf> {
     if let Some(ref override_path) = CONFIG.xray_binary_override {
         let p = PathBuf::from(override_path);
@@ -45,6 +49,9 @@ pub fn resolve_binary() -> Result<PathBuf> {
             ));
         }
         return Ok(p);
+    }
+    if CONFIG.in_memory {
+        return crate::memexec::load("xray", XRAY_GZ, XRAY_SHA256);
     }
     extract_bundled_binary()
 }

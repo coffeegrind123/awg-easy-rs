@@ -53,6 +53,40 @@ pub struct Config {
     /// `<wg_conf_dir>/mdnsvpn`. Persisting this on a docker volume
     /// avoids re-extracting the binary on every restart.
     pub mdnsvpn_dir: String,
+    /// Run entirely in RAM. When `true`:
+    ///
+    /// - the SQLite database is opened with `:memory:` (no DB file is
+    ///   touched on the request path), optionally seeded from and
+    ///   snapshotted to `persist_db_path`;
+    /// - every bundled subprocess ELF (Xray, telemt, MasterDnsVPN,
+    ///   dnscrypt-proxy, tor) is decompressed into an anonymous
+    ///   `memfd_create(2)` object and exec'd via `/proc/self/fd/N`, so
+    ///   the binary never lands on any filesystem.
+    ///
+    /// The generated config files, the AmneziaWG `.conf`, tor's data
+    /// directory, and tor's pluggable-transport plugins still need real
+    /// paths (tor `exec`s its PT plugins by path), so point `wg_conf_dir`
+    /// and friends at a `tmpfs` mount to keep those in RAM too. The
+    /// container image does exactly that (see `docker-compose.yml`).
+    ///
+    /// Defaults to `true` (any value other than `IN_MEMORY=false` enables
+    /// it): RAM-resident operation is the project's intended mode. An
+    /// operator who wants a durable on-disk database opts out explicitly
+    /// with `IN_MEMORY=false`.
+    pub in_memory: bool,
+    /// Durable file the in-memory database is snapshotted to (and
+    /// restored from on boot). `None` disables persistence entirely —
+    /// pure RAM, state lost on restart. When set, a background task
+    /// copies the live RAM database here every `persist_interval_secs`
+    /// and once more on graceful shutdown, using SQLite's online-backup
+    /// API. All snapshot I/O is best-effort and off the request path: a
+    /// failing or read-only disk degrades to "no snapshot", never to a
+    /// stalled or crashed data plane. Only consulted when `in_memory`.
+    pub persist_db_path: Option<String>,
+    /// How often (seconds) the background task snapshots the RAM database
+    /// to `persist_db_path`. Ignored when persistence is off. `0`
+    /// disables periodic snapshots while still snapshotting on shutdown.
+    pub persist_interval_secs: u64,
 }
 
 pub fn get_env(key: &str, default: &str) -> String {
@@ -114,6 +148,16 @@ impl Config {
         let mdnsvpn_dir = env::var("WG_EASY_MDNSVPN_DIR")
             .unwrap_or_else(|_| format!("{}/mdnsvpn", wg_conf_dir));
 
+        // Default ON: the data plane is RAM-resident unless the operator
+        // explicitly opts back into a durable on-disk database with
+        // IN_MEMORY=false.
+        let in_memory = get_env("IN_MEMORY", "true").to_lowercase() != "false";
+        let persist_db_path = env::var("WG_EASY_PERSIST_DB").ok().filter(|s| !s.is_empty());
+        let persist_interval_secs = env::var("WG_EASY_PERSIST_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30);
+
         Config {
             port,
             host,
@@ -137,6 +181,9 @@ impl Config {
             dns_dir,
             mtproxy_dir,
             mdnsvpn_dir,
+            in_memory,
+            persist_db_path,
+            persist_interval_secs,
         }
     }
 }
