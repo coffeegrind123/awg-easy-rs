@@ -112,6 +112,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("MasterDnsVPN supervisor startup failed (non-fatal): {e}");
     }
 
+    // Bring the in-process DPI-imitation proxy online if it's been enabled.
+    // AmneziaWG has already been brought up on its effective ListenPort by
+    // `wg::startup` (loopback backend port when the proxy is enabled), so
+    // here we lock that backend port down to loopback and bind the proxy on
+    // the public port. Non-fatal — a bind failure surfaces as Status::Crashed
+    // in the admin UI rather than a startup crash.
+    if let Ok(iface) = db::get_interface() {
+        if let Err(e) = firewall::apply_proxy_lockdown(&iface) {
+            tracing::warn!("proxy backend lockdown failed (non-fatal): {e}");
+        }
+    }
+    if let Err(e) = awg_easy_rs::proxy::supervisor::ensure_running().await {
+        tracing::warn!("DPI proxy startup failed (non-fatal): {e}");
+    }
+
     let app_state = api::AppState::new();
 
     // In-memory mode with a configured durable path: snapshot the RAM
@@ -238,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
     awg_easy_rs::mtproxy::supervisor::shutdown_for_exit().await;
     #[cfg(mdnsvpn_bundled)]
     awg_easy_rs::mdnsvpn::supervisor::shutdown_for_exit().await;
+    awg_easy_rs::proxy::supervisor::shutdown_for_exit().await;
 
     if let Ok(iface) = db::get_interface() {
         firewall::remove_legacy_compat(

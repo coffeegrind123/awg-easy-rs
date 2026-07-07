@@ -65,8 +65,34 @@ x509-parser = "0.16"
 # reload-without-restart and graceful shutdown.
 libc = "0.2"
 
-# Logging
-tracing = "0.1"
+# --- In-process DPI-imitation proxy (src/proxy/) ---
+# The AmneziaWG-fronting UDP proxy that makes the tunnel look like
+# QUIC/DNS/STUN/SIP to DPI. Ported in-process from wiresock/amneziawg-proxy
+# — these are its transitive dependencies.
+bytes = "1"
+# Concurrent per-client session/metrics maps on the data path — lock-free
+# in steady state (see src/proxy/session.rs, src/proxy/metrics.rs).
+dashmap = "6"
+# SO_RCVBUF/SO_SNDBUF sizing on the frontend + per-session backend sockets.
+socket2 = "0.6"
+# Stateful QUIC/TLS-1.3 handshake responder for QUIC-mode probes
+# (src/proxy/quic_handshake.rs). Pairs with rcgen for the self-signed
+# per-SNI server certificate.
+quinn-proto = "0.11"
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+# TOML parse for the proxy's own ProxyConfig (kept so the ported config
+# tests compile; runtime config is built from the DB, not a file).
+toml = "0.8"
+# Typed error enum for the proxy modules (src/proxy/errors.rs).
+thiserror = "1"
+
+# Logging.
+# `release_max_level_info` statically compiles out trace!/debug! callsites in
+# release builds. The proxy data path logs per-packet at debug; without this a
+# stray RUST_LOG=debug in production would collapse throughput, and each
+# callsite otherwise costs an atomic level check per datagram. Debug builds
+# keep full verbosity.
+tracing = { version = "0.1", features = ["release_max_level_info"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
@@ -79,6 +105,12 @@ tower = { version = "0.5", features = ["util"] }
 
 # URL encoding for TOTP URI
 url = "2"
+
+# Ported proxy test modules (src/proxy/*.rs #[cfg(test)]): temp dirs for
+# config-file round-trips, and tokio's paused-clock test harness for the
+# session-TTL / cleanup-sweep timing tests.
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [profile.release]
 opt-level = "z"     # Optimize for size

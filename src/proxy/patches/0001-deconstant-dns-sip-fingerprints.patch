@@ -1,0 +1,94 @@
+--- transform.rs
++++ transform.rs
+@@ -212,11 +212,23 @@
+     DNS_HEADER_LEN + DNS_ROOT_QUESTION_LEN + DNS_OPT_FIXED_LEN + DNS_OPT_OPTION_HDR_LEN; // 32
+ /// EDNS0 OPT advertised UDP payload size (modern resolver default, RFC 6891).
+ const DNS_OPT_UDP_SIZE: u16 = 1232;
+-/// EDNS0 option code for the opaque cover payload. 65001 (0xFDE9) is in the
++/// EDNS0 option-code range for the opaque cover payload. 65001–65534 is the
+ /// IANA "local/experimental" range (RFC 6891 §6.1.2): resolvers must ignore
+ /// unknown options regardless of length, so this carries the ciphertext without
+ /// the zero-content expectation that option code 12 (Padding, RFC 7830) implies.
+-const DNS_OPT_COVER_CODE: u16 = 0xFDE9;
++///
++/// awg-easy-rs patch: rather than pin a single constant (upstream used a fixed
++/// `0xFDE9`, which is a perfect one-rule cross-deployment DPI signature), the
++/// exact code is drawn per-packet from the payload-seeded transaction ID and
++/// stays inside the local-use range — so no single value identifies the tool.
++const DNS_OPT_COVER_CODE_BASE: u16 = 65001;
++const DNS_OPT_COVER_CODE_SPAN: u16 = 65535 - DNS_OPT_COVER_CODE_BASE; // 534 → [65001,65534]
++
++/// Per-packet EDNS cover option code in [65001, 65534], derived deterministically
++/// from the (payload-seeded) DNS transaction ID. No allocation, no global RNG.
++fn dns_cover_code(txid: [u8; 2]) -> u16 {
++    DNS_OPT_COVER_CODE_BASE + (u16::from_be_bytes(txid) % DNS_OPT_COVER_CODE_SPAN)
++}
+ 
+ /// DNS-style padding: a realistic EDNS *response* whose Additional-section
+ /// `OPT (41)` record (RFC 6891) accounts for every byte of the UDP datagram
+@@ -331,7 +343,7 @@
+ 
+     // OPT RR fixed prefix (11 B) + option header (4 B).
+     let [rl_hi, rl_lo] = rdlength.to_be_bytes();
+-    let [oc_hi, oc_lo] = DNS_OPT_COVER_CODE.to_be_bytes();
++    let [oc_hi, oc_lo] = dns_cover_code(txid).to_be_bytes();
+     let [ol_hi, ol_lo] = opt_len.to_be_bytes();
+     let [us_hi, us_lo] = DNS_OPT_UDP_SIZE.to_be_bytes();
+     #[rustfmt::skip]
+@@ -341,7 +353,7 @@
+         us_hi, us_lo,   // CLASS = requestor's UDP payload size (1232)
+         0x00, 0x00, 0x00, 0x00, // TTL: ext-RCODE 0, EDNS version 0, flags 0 (DO=0)
+         rl_hi, rl_lo,   // RDLENGTH = option header + option-data
+-        oc_hi, oc_lo,   // OPTION-CODE = 0xFDE9 (unknown / local-use)
++        oc_hi, oc_lo,   // OPTION-CODE = per-packet local-use code in [65001,65534]
+         ol_hi, ol_lo,   // OPTION-LENGTH = option-data bytes (zero-fill tail + payload)
+     ];
+     padding[opt_off..opt_off + opt.len()].copy_from_slice(&opt);
+@@ -605,10 +617,23 @@
+         }};
+     }
+     const STATUS: [&str; 3] = ["100 Trying", "180 Ringing", "200 OK"];
+-    const HOSTS: [&str; 3] = ["sip.example.com", "pbx.example.net", "voip.example.org"];
+     const METHODS: [&str; 3] = ["INVITE", "OPTIONS", "REGISTER"];
+     let status_idx = next!() as usize % STATUS.len();
+-    let host = HOSTS[next!() as usize % HOSTS.len()];
++    // awg-easy-rs patch: build a plausible, non-reserved host per packet from
++    // the seed instead of fixed `*.example.*` literals (upstream), which are an
++    // RFC-2606 substring signature. Label + numeric id + TLD, all seed-drawn.
++    const SIP_LABELS: [&str; 8] = ["voip", "sip", "pbx", "call", "trunk", "edge", "rtc", "sbc"];
++    const SIP_TLDS: [&str; 6] = ["net", "com", "io", "org", "cloud", "tel"];
++    let sip_label = SIP_LABELS[next!() as usize % SIP_LABELS.len()];
++    let sip_num = next!() % 1000;
++    let sip_tld = SIP_TLDS[next!() as usize % SIP_TLDS.len()];
++    let mut host_buf = [0u8; 40];
++    let host_len = {
++        let mut w = SliceWriter { buf: &mut host_buf, len: 0 };
++        let _ = write!(w, "{sip_label}{sip_num}.{sip_tld}");
++        w.len
++    };
++    let host: &str = core::str::from_utf8(&host_buf[..host_len]).unwrap_or("sip.local");
+     let method = METHODS[next!() as usize % METHODS.len()];
+     let branch = next!();
+     let from_tag = next!();
+@@ -882,8 +907,9 @@
+         assert_eq!(&data[22..26], &[0x00, 0x00, 0x00, 0x00], "TTL field 0");
+         // RDLENGTH = 46 - 28 = 18 (option header 4 + option-data 14).
+         assert_eq!(&data[26..28], &[0x00, 18], "RDLENGTH");
+-        // Option: CODE 0xFDE9 (unknown) + LENGTH 14.
+-        assert_eq!(&data[28..30], &0xFDE9u16.to_be_bytes(), "OPTION-CODE");
++        // Option: CODE in the IANA local-use range [65001,65534] (per-packet) + LENGTH 14.
++        let oc = u16::from_be_bytes([data[28], data[29]]);
++        assert!((65001..=65534).contains(&oc), "OPTION-CODE local-use, got {oc:#06x}");
+         assert_eq!(&data[30..32], &[0x00, 14], "OPTION-LENGTH");
+         // Option-data prefix in padding (bytes 32..40) is zero-filled.
+         assert!(data[32..40].iter().all(|&b| b == 0x00), "option-data zero-fill");
+@@ -1609,7 +1635,8 @@
+         // OPT RR at byte 17. RDLENGTH = 132 - 28 = 104; OPTION-LENGTH = 132 - 32 = 100.
+         assert_eq!(&pkt[18..20], &[0x00, 0x29], "DNS TYPE=OPT(41)");
+         assert_eq!(&pkt[26..28], &104u16.to_be_bytes(), "OPT RDLENGTH=104");
+-        assert_eq!(&pkt[28..30], &0xFDE9u16.to_be_bytes(), "OPTION-CODE");
++        let oc = u16::from_be_bytes([pkt[28], pkt[29]]);
++        assert!((65001..=65534).contains(&oc), "OPTION-CODE local-use, got {oc:#06x}");
+         assert_eq!(&pkt[30..32], &100u16.to_be_bytes(), "OPTION-LENGTH=100");
+         // AWG header and body start at offset 40, untouched.
+         assert_eq!(&pkt[40..44], &350u32.to_le_bytes());

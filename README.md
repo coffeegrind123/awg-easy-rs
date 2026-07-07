@@ -10,6 +10,10 @@ Four transports + an optional bundled resolver, all sharing one admin UI, user a
 - **DNS-tunnel mode** — [MasterDnsVPN](https://github.com/masterking32/MasterDnsVPN) DNS-over-DNS tunnel: clients pack encrypted TCP/SOCKS5 traffic into DNS queries through public resolvers, the server listens on UDP/53 for tunnel envelopes (via NS-delegated subdomain) and re-emits the inner TCP through SOCKS5 or a fixed TCP forwarder. Survives total egress blackouts where only DNS is allowed.
 - **DNS bundle (optional)** — bundled [dnscrypt-proxy](https://github.com/DNSCrypt/dnscrypt-proxy) with optional [tor](https://www.torproject.org/) + lyrebird/snowflake/webtunnel pluggable transports for DoH/DNSCrypt egress, plus an nftables `dns-prerouting` DNAT chain that catches peer-side `:53/:853` leaks before they reach the WAN.
 
+- **DPI-imitation proxy (optional)** — an in-process async UDP proxy that *fronts the AmneziaWG port itself* and rewrites each packet's S1–S4 padding so the datagrams look like a real **QUIC / DNS / STUN / SIP** service to Deep Packet Inspection — while answering active protocol probes with valid responses (QUIC Version Negotiation / a full TLS 1.3 handshake, DNS SERVFAIL-or-forwarded-answer, STUN Binding Success, a stateful SIP dialog). Unlike the four transports above (which move you onto a *different* protocol), this hardens the native low-latency AmneziaWG datapath in place. When enabled, AmneziaWG is transparently rebound to a loopback backend port (firewalled to `lo`) and the proxy takes the public port — **client configs are unchanged**. Ported in-process from [wiresock/amneziawg-proxy](https://github.com/wiresock/amneziawg-install); bidirectional imitation is fully unlocked with [WireSock Secure Connect 3.5+](https://www.wiresock.net/) on the client.
+
+  > **Detection trade-off — this is protocol *mimicry*, not a crypto layer, and it is off by default.** It cannot weaken WireGuard's encryption (the proxy holds no keys and rewrites only the random junk-padding prefix; the audit confirms it never touches the authenticated region). What it changes is *detectability*, and the direction depends on the adversary: it **helps** against commodity entropy/whitelist DPI and shallow active probers (where plain AmneziaWG reads as suspicious high-entropy UDP), but against an adversary who fingerprints *this specific tool* it can be **more** detectable than plain AmneziaWG — the imitation adds fixed protocol markers (and leaves AmneziaWG's own handshake-size tells intact underneath). This is the well-known ["Parrot is Dead"](https://people.cs.umass.edu/~amir/papers/parrot.pdf) limitation of all unauthenticated mimicry, not a flaw unique to this tool. Prefer `quic` mode (weakest static signature); `dns`/`sip` carry stronger fixed tells. Enable it only when countering commodity blocking.
+
 - **~20 MB stripped release binary** (musl-static, distro-agnostic — runs unchanged on glibc, musl, or any other libc x86_64 host). Bundled Xray accounts for ~13 MB; telemt adds ~6 MB; MasterDnsVPN adds ~2 MB; the DNS bundle adds another ~20 MB when curated.
 - **400+ unit + integration tests** (DB, auth, security, API, AmneziaWG kernel-parity, Xray Reality e2e, telemt + MasterDnsVPN config-gen smoke).
 - **Native nftables firewall** — single `inet awg-easy-rs` table with atomic transactions. Transparent compat shim for hosts still on `iptables-legacy`: detected at startup, three FORWARD/INPUT accept rules mirrored into the legacy backend, removed on graceful shutdown.
@@ -32,6 +36,7 @@ Four transports + an optional bundled resolver, all sharing one admin UI, user a
 | **Auth** | Argon2id password hashing, server-side session cookies (`SameSite=Strict`, `HttpOnly`, `Secure` unless `INSECURE=true`). Per-username (10/min) **and** per-source-IP (50/min) login rate limit. Constant-time username-not-found path (no enumeration via timing). |
 | **2FA / TOTP** | Server-generated 20-byte secrets, RFC 6238 verification, separate 5/5min rate limit on TOTP code attempts. `setup` / `create` / `delete` API contract. |
 | **Setup wizard** | 4-step first-run flow. `INIT_ENABLED` env-var auto-setup for Kubernetes/CI deployments. |
+| **DPI-imitation proxy** | In-process async UDP proxy (ported from [amneziawg-proxy](https://github.com/wiresock/amneziawg-install)) fronting the AmneziaWG port. Protocol modes `quic` / `dns` / `stun` / `sip` / `auto`; per-packet S1–S4 padding transform driven by the interface's live S/H params; active-probe responders including a stateful `quinn-proto` QUIC/TLS-1.3 handshake responder (self-signed per-SNI cert) and a stateful SIP dialog machine; optional real DNS-upstream forwarding. Supervised as a Tokio task (no subprocess, no blob). Enabling it rebinds AmneziaWG onto a loopback backend port + an nftables `proxy-lockdown` input chain confining that port to `lo`; client `Endpoint` lines are untouched. |
 | **Per-client firewall** | Native nftables `wg-clients` chain inside the `inet awg-easy-rs` table. `IP:port[/tcp\|udp]` rules, default-deny, atomic rebuild via a single `nft -f -` transaction. (AmneziaWG side only; Xray, telemt, and MasterDnsVPN multiplex through one socket each, so per-peer L3/L4 filtering doesn't compose with VLESS UUIDs / MTProxy secrets / DNS-tunnel envelopes.) |
 | **Metrics** | `/metrics/json` and `/metrics/prometheus`, gated by hashed Bearer token (when `metricsPassword` is set). Exposes per-peer rx/tx, last-handshake, online state. |
 | **Operational** | Background cron expires clients/one-time-links every 60 s. `/health` endpoint (always 200). Persistent SQLite (WAL mode, foreign keys on). Idempotent schema migrations. |
@@ -61,6 +66,18 @@ sudo /usr/local/bin/awg-easy-rs
 ```
 
 The release page lists SHA-256 hashes and the version of every bundled component (Xray, telemt, dnscrypt-proxy, tor, etc.) sourced from the `vendor/*_VERSION` pin files at build time.
+
+### Bare-metal install (systemd)
+
+For a host install without Docker, `scripts/install.sh` provisions the AmneziaWG kernel module (DKMS via the distro's package repos), installs the `awg-easy-rs` binary, and runs it as a systemd service:
+
+```bash
+curl -O https://raw.githubusercontent.com/coffeegrind123/awg-easy-rs/main/scripts/install.sh
+chmod +x install.sh
+sudo ./install.sh              # guided; or: sudo AUTO_INSTALL=y ./install.sh
+```
+
+Supports Debian ≥11 / Ubuntu ≥22.04 / Mint ≥21 (Fedora/RHEL-family code paths are present but gated until verified AmneziaWG 2.0 RPMs ship). Subcommands: `install` / `upgrade` / `uninstall` / `status`. Migrating a pre-2.0 on-disk AmneziaWG server? `scripts/migrate-pre2.sh` backfills S3/S4 and converts H1–H4 to non-overlapping ranges in place, with `.bak` backup and rollback. Full reference: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### First-run
 

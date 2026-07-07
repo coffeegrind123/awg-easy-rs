@@ -77,6 +77,21 @@ pub fn generate_awg_params() -> AwgParams {
         }
     };
 
+    // AmneziaWG 2.0 S3/S4 padding sizes. The upstream amneziawg-install
+    // reference generates both (15..=150) under the bidirectional rule
+    // `S3 + 56 != S4 && S4 + 56 != S3` (56 = WG handshake-init size, the
+    // same magic constant that governs S1/S2). awg-easy previously left
+    // these `None`, which silently dropped half of the advertised
+    // "S1‑S4" obfuscation set — every fresh interface now ships a full
+    // 2.0 padding profile. Regenerate until the pair is collision-free.
+    let (s3, s4) = loop {
+        let a = rng.gen_range(15..=150);
+        let b = rng.gen_range(15..=150);
+        if a + 56 != b && b + 56 != a {
+            break (a, b);
+        }
+    };
+
     // AmneziaWG 2.0 magic headers — emit 4 non-overlapping windows so the
     // server selects a fresh value per packet (1.5-style single-integer
     // headers are accepted but provide weaker obfuscation). Layout:
@@ -118,8 +133,8 @@ pub fn generate_awg_params() -> AwgParams {
         jmax,
         s1,
         s2,
-        s3: None,
-        s4: None,
+        s3: Some(s3),
+        s4: Some(s4),
         h1: h[0].clone(),
         h2: h[1].clone(),
         h3: h[2].clone(),
@@ -249,6 +264,28 @@ pub fn validate_awg_params(params: &AwgParams) -> Result<(), String> {
         return Err("S1+56 != S2".into());
     }
 
+    // AmneziaWG 2.0 S3/S4. Both are optional at the type level (a pre-2.0
+    // interface may carry neither), but when present each must sit in the
+    // same spec window as S1/S2 and the pair must satisfy the bidirectional
+    // `S3 + 56 != S4 && S4 + 56 != S3` rule that upstream amneziawg-install
+    // enforces. A lone S3 (or lone S4) is allowed — the ±56 check only
+    // applies once both sides are set.
+    if let Some(s3) = params.s3 {
+        if !(0..=1132).contains(&s3) {
+            return Err("S3 must be 0-1132".into());
+        }
+    }
+    if let Some(s4) = params.s4 {
+        if !(0..=1188).contains(&s4) {
+            return Err("S4 must be 0-1188".into());
+        }
+    }
+    if let (Some(s3), Some(s4)) = (params.s3, params.s4) {
+        if s3 + 56 == s4 || s4 + 56 == s3 {
+            return Err("S3+56 != S4 and S4+56 != S3".into());
+        }
+    }
+
     // All magic headers must be distinct
     let headers = [&params.h1, &params.h2, &params.h3, &params.h4];
     for i in 0..4 {
@@ -346,6 +383,45 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_s3_plus_56_equals_s4() {
+        let mut p = generate_awg_params();
+        // Bidirectional collision — either direction is illegal.
+        p.s3 = Some(60);
+        p.s4 = Some(116); // 60 + 56
+        assert!(validate_awg_params(&p).is_err());
+        p.s3 = Some(116);
+        p.s4 = Some(60); // 60 + 56 the other way
+        assert!(validate_awg_params(&p).is_err());
+        // One off the collision is fine.
+        p.s3 = Some(60);
+        p.s4 = Some(117);
+        assert!(validate_awg_params(&p).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_s3_s4() {
+        let mut p = generate_awg_params();
+        p.s3 = Some(1133); // > 1132 spec max
+        assert!(validate_awg_params(&p).is_err());
+        let mut p = generate_awg_params();
+        p.s4 = Some(1189); // > 1188 spec max
+        assert!(validate_awg_params(&p).is_err());
+    }
+
+    #[test]
+    fn lone_s3_or_s4_is_allowed() {
+        // A pre-2.0 interface may legitimately carry only one (or neither);
+        // the ±56 rule only engages once both are present.
+        let mut p = generate_awg_params();
+        p.s3 = Some(80);
+        p.s4 = None;
+        assert!(validate_awg_params(&p).is_ok());
+        p.s3 = None;
+        p.s4 = Some(80);
+        assert!(validate_awg_params(&p).is_ok());
+    }
+
+    #[test]
     fn generated_params_pass_validation() {
         // Generation must produce valid params on every iteration.
         for _ in 0..100 {
@@ -353,6 +429,13 @@ mod tests {
             validate_awg_params(&p).expect("generated params should validate");
             assert!(p.jmax < 1280, "Jmax must be strictly < 1280");
             assert!(p.jmin < p.jmax);
+            // AmneziaWG 2.0: S3/S4 must be generated (not left None) and
+            // must satisfy the bidirectional ±56 rule.
+            let s3 = p.s3.expect("S3 must be generated");
+            let s4 = p.s4.expect("S4 must be generated");
+            assert!((15..=150).contains(&s3), "S3 out of gen range: {s3}");
+            assert!((15..=150).contains(&s4), "S4 out of gen range: {s4}");
+            assert!(s3 + 56 != s4 && s4 + 56 != s3, "S3/S4 ±56 collision");
             // Defaults emit ranges, not single integers.
             for h in [&p.h1, &p.h2, &p.h3, &p.h4] {
                 assert!(h.contains('-'), "H must be a `start-end` range, got {h:?}");

@@ -76,6 +76,14 @@ const DNS_FILTER_CHAIN: &str = "dns-lockdown";
 /// when it has no rules.
 const DNS_NAT_CHAIN: &str = "dns-prerouting";
 
+/// Input-hook filter chain that confines AmneziaWG's loopback backend port
+/// to the loopback interface while the DPI-imitation proxy fronts the
+/// public port. Without it, AmneziaWG (which binds the backend port on all
+/// addresses) would still answer raw handshakes on that port from the WAN,
+/// letting a prober bypass the proxy's protocol imitation entirely.
+/// Created when the proxy is active, torn down when it isn't.
+const PROXY_LOCKDOWN_CHAIN: &str = "proxy-lockdown";
+
 /// Run a single `nft` invocation with the given argv. argv-only — no
 /// shell — so peer names containing quotes / backticks / shell metas
 /// can never escape into command interpretation.
@@ -409,6 +417,46 @@ fn remove_dns_lockdown(iface: &str) -> Result<()> {
     let _ = nft_apply(&format!(
         "flush chain inet {TABLE} {DNS_NAT_CHAIN}\n\
          delete chain inet {TABLE} {DNS_NAT_CHAIN}\n"
+    ));
+    Ok(())
+}
+
+/// Confine (or release) the AmneziaWG loopback backend port for the DPI
+/// proxy. Idempotent: when the proxy is active it (re)creates the
+/// `proxy-lockdown` input chain with a single rule dropping any external
+/// packet to the backend port (loopback traffic — the proxy→AWG hop — is
+/// left alone); when the proxy is inactive it tears the chain down.
+///
+/// Whether the proxy is active, and which loopback port AmneziaWG moved
+/// to, are both derived from the same source of truth the config
+/// generator uses ([`crate::proxy::supervisor::effective_listen_port`]),
+/// so the firewall and the `.conf` can never disagree about the backend
+/// port. Best-effort and non-fatal at the call sites.
+pub fn apply_proxy_lockdown(iface: &crate::db::Interface) -> Result<()> {
+    let backend = crate::proxy::supervisor::effective_listen_port(iface);
+    if backend == iface.port {
+        // Proxy inactive — AmneziaWG owns the public port directly.
+        return remove_proxy_lockdown();
+    }
+    // `add chain` is idempotent (no-op if present); `flush` then clears any
+    // prior rule so a backend-port change doesn't leave a stale drop.
+    let txn = format!(
+        "add table inet {TABLE}\n\
+         add chain inet {TABLE} {PROXY_LOCKDOWN_CHAIN} \
+           {{ type filter hook input priority filter; policy accept; }}\n\
+         flush chain inet {TABLE} {PROXY_LOCKDOWN_CHAIN}\n\
+         add rule inet {TABLE} {PROXY_LOCKDOWN_CHAIN} \
+           udp dport {backend} iifname != \"lo\" drop\n"
+    );
+    nft_apply(&txn)
+}
+
+/// Remove the proxy backend lockdown chain. Best-effort — an absent chain
+/// is fine (delete of a missing chain returns non-zero, which we swallow).
+fn remove_proxy_lockdown() -> Result<()> {
+    let _ = nft_apply(&format!(
+        "flush chain inet {TABLE} {PROXY_LOCKDOWN_CHAIN}\n\
+         delete chain inet {TABLE} {PROXY_LOCKDOWN_CHAIN}\n"
     ));
     Ok(())
 }

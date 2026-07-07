@@ -260,6 +260,56 @@ pub struct XrayInbound {
     pub updated_at: String,
 }
 
+/// Singleton row (`id = 'proxy0'`) holding the in-process DPI-imitation
+/// proxy configuration. Read by `proxy::supervisor` at startup and after
+/// every admin POST. The proxy fronts the AmneziaWG UDP port and makes the
+/// datagrams look like QUIC / DNS / STUN / SIP to DPI.
+///
+/// Port model: the proxy always binds the interface's *public* port
+/// (`interfaces_table.port`) so client `Endpoint` lines never change;
+/// AmneziaWG itself is moved onto `backend_port` (loopback-restricted by
+/// the firewall). Only `backend_port` is operator-tunable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxySettings {
+    pub id: String,
+    /// When false the supervisor tears the proxy down and AmneziaWG keeps
+    /// the public port directly. Safe default — no obfuscation layer until
+    /// the operator opts in.
+    pub enabled: bool,
+    /// Protocol the proxy imitates: `quic` | `dns` | `stun` | `sip` |
+    /// `auto`. Maps to `ProxyConfig::imitate_protocol`.
+    pub protocol: String,
+    /// Loopback port AmneziaWG is rebound to while the proxy is enabled.
+    /// `0` = auto (`interface.port ± 1`). The proxy forwards decrypted
+    /// frontend datagrams to `127.0.0.1:<backend_port>`.
+    pub backend_port: i64,
+    /// Answer QUIC Initial probes with a real TLS 1.3 server flight
+    /// (`ProxyConfig::quic_handshake_enabled`). Only consulted for
+    /// `quic` / `auto`.
+    pub quic_handshake: bool,
+    /// Domain placed in the self-signed QUIC server certificate when
+    /// `quic_handshake` is on. Must be non-empty then.
+    pub quic_cert_domain: String,
+    /// Forward DNS probes to a real upstream resolver instead of always
+    /// synthesising SERVFAIL (`ProxyConfig::dns_forward_enabled`). Only
+    /// consulted for `dns` / `auto`.
+    pub dns_forward: bool,
+    /// Upstream resolver `host:port` used when `dns_forward` is on.
+    pub dns_upstream: String,
+    /// Free-form escape hatch, reserved for future proxy tunables the UI
+    /// doesn't model. Empty by default.
+    pub additional_config: String,
+    /// Cap on concurrent proxy sessions. Each session is one backend UDP
+    /// socket (fd) + one relay task, so this bounds the blast radius of a
+    /// spoofed-source flood pinning slots. Conservative default (2048).
+    pub max_sessions: i64,
+    /// Seconds an idle session is kept before reaping. Lower = spoofed
+    /// junk sessions free their fd/slot sooner. Default 120.
+    pub session_ttl: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Singleton row holding the bundled-DNS-stack configuration. Read by
 /// `dns::supervisor` at startup and after every admin POST. The
 /// supervisor is the sole consumer — keep field-level docs in sync with
@@ -866,6 +916,26 @@ impl XrayInbound {
     }
 }
 
+impl ProxySettings {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(ProxySettings {
+            id: row.get("id")?,
+            enabled: int_to_bool(row.get::<_, i64>("enabled")?),
+            protocol: row.get("protocol")?,
+            backend_port: row.get("backend_port")?,
+            quic_handshake: int_to_bool(row.get::<_, i64>("quic_handshake")?),
+            quic_cert_domain: row.get("quic_cert_domain")?,
+            dns_forward: int_to_bool(row.get::<_, i64>("dns_forward")?),
+            dns_upstream: row.get("dns_upstream")?,
+            additional_config: row.get("additional_config")?,
+            max_sessions: row.get("max_sessions")?,
+            session_ttl: row.get("session_ttl")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
 impl XrayClient {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         Ok(XrayClient {
@@ -1189,6 +1259,29 @@ CREATE TABLE IF NOT EXISTS xray_clients_table (
     FOREIGN KEY (inbound_id) REFERENCES xray_inbound_table(id)
 )"#;
 
+// proxy_settings_table — singleton (id always 'proxy0'). Configuration
+// for the in-process DPI-imitation proxy that fronts the AmneziaWG UDP
+// port. Disabled by default (AmneziaWG keeps the public port directly).
+// Mirrors xray_inbound_table's singleton pattern. Column-level defaults
+// give QUIC imitation with the stateful handshake responder on, DNS
+// forwarding off, and backend_port auto (0 → interface.port ± 1).
+const CREATE_PROXY_SETTINGS: &str = r#"
+CREATE TABLE IF NOT EXISTS proxy_settings_table (
+    id                TEXT PRIMARY KEY,
+    enabled           INTEGER NOT NULL DEFAULT 0,
+    protocol          TEXT NOT NULL DEFAULT 'quic',
+    backend_port      INTEGER NOT NULL DEFAULT 0,
+    quic_handshake    INTEGER NOT NULL DEFAULT 1,
+    quic_cert_domain  TEXT NOT NULL DEFAULT 'www.cloudflare.com',
+    dns_forward       INTEGER NOT NULL DEFAULT 0,
+    dns_upstream      TEXT NOT NULL DEFAULT '1.1.1.1:53',
+    additional_config TEXT NOT NULL DEFAULT '',
+    max_sessions      INTEGER NOT NULL DEFAULT 2048,
+    session_ttl       INTEGER NOT NULL DEFAULT 120,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+)"#;
+
 // dns_bundle_table — singleton (id always 'dns0'). Configuration for the
 // bundled dnscrypt-proxy + (opt-in) tor stack. Defaults match the
 // "minimum risk" posture: dnscrypt off, tor off. The supervisor reads
@@ -1382,6 +1475,7 @@ fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(CREATE_DNS_BUNDLE)?;
     conn.execute_batch(CREATE_XRAY_INBOUND)?;
     conn.execute_batch(CREATE_XRAY_CLIENTS)?;
+    conn.execute_batch(CREATE_PROXY_SETTINGS)?;
     conn.execute_batch(CREATE_MTPROXY_INBOUND)?;
     conn.execute_batch(CREATE_MTPROXY_USERS)?;
     conn.execute_batch(CREATE_MDNSVPN_INBOUND)?;
@@ -1478,6 +1572,20 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         tracing::info!(
             "DB migration: added xray_inbound_table.xhttp_path (xhttpSettings.path)"
         );
+    }
+    // DPI-proxy session caps. Bound the spoofed-source fd/session-exhaustion
+    // blast radius; conservative defaults, operator-tunable in the admin UI.
+    if !column_exists(conn, "proxy_settings_table", "max_sessions")? {
+        conn.execute_batch(
+            "ALTER TABLE proxy_settings_table ADD COLUMN max_sessions INTEGER NOT NULL DEFAULT 2048",
+        )?;
+        tracing::info!("DB migration: added proxy_settings_table.max_sessions");
+    }
+    if !column_exists(conn, "proxy_settings_table", "session_ttl")? {
+        conn.execute_batch(
+            "ALTER TABLE proxy_settings_table ADD COLUMN session_ttl INTEGER NOT NULL DEFAULT 120",
+        )?;
+        tracing::info!("DB migration: added proxy_settings_table.session_ttl");
     }
     // One-shot: replace the iptables-flavoured default hooks from earlier
     // versions with the native nftables equivalents. Only fires when the
@@ -1649,6 +1757,14 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
             "chrome",
             0,
         ],
+    )?;
+
+    // proxy_settings default — disabled until the operator opts in.
+    // Column-level defaults supply QUIC imitation, handshake responder on,
+    // DNS forwarding off, backend_port auto.
+    conn.execute(
+        "INSERT OR IGNORE INTO proxy_settings_table (id) VALUES (?1)",
+        params!["proxy0"],
     )?;
 
     // mtproxy_inbound default — disabled until the operator picks a TLS
@@ -2425,6 +2541,33 @@ pub fn update_xray_inbound(fields: &UpdateMap) -> Result<()> {
         WhereVal::Str("xray0"),
         fields,
         VALID_XRAY_INBOUND_COLUMNS,
+        &["id"],
+    )
+}
+
+pub fn get_proxy_settings() -> Result<ProxySettings> {
+    let c = conn();
+    c.query_row(
+        "SELECT * FROM proxy_settings_table WHERE id = 'proxy0'",
+        [],
+        ProxySettings::from_row,
+    )
+    .context("No proxy_settings row found")
+}
+
+const VALID_PROXY_SETTINGS_COLUMNS: &[&str] = &[
+    "enabled", "protocol", "backend_port", "quic_handshake",
+    "quic_cert_domain", "dns_forward", "dns_upstream", "additional_config",
+    "max_sessions", "session_ttl",
+];
+
+pub fn update_proxy_settings(fields: &UpdateMap) -> Result<()> {
+    exec_update(
+        "proxy_settings_table",
+        "id",
+        WhereVal::Str("proxy0"),
+        fields,
+        VALID_PROXY_SETTINGS_COLUMNS,
         &["id"],
     )
 }

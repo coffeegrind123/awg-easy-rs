@@ -1,0 +1,88 @@
+[Unit]
+Description=awg-easy-rs — AmneziaWG VPN + proxy manager with web UI
+Documentation=https://github.com/coffeegrind123/awg-easy-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5s
+
+# --- Run as root ------------------------------------------------------------
+# awg-easy-rs owns the AmneziaWG interface lifecycle itself: on startup it runs
+# `awg-quick up awg0` (writing /etc/wireguard/awg0.conf), and on shutdown it
+# tears the interface down. That requires:
+#   * CAP_NET_ADMIN  — create/configure the awg0 interface, program routes and
+#                      the nftables/iptables firewall.
+#   * CAP_SYS_MODULE — load the amneziawg kernel module on demand.
+# The simplest correct model (and the one upstream's Docker image uses) is to
+# run as root. The ambient capabilities below are declared explicitly so the
+# intent is documented and so a future move to a non-root User= keeps working.
+User=root
+Group=root
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_MODULE CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SYS_ADMIN
+
+# --- Binary and configuration ------------------------------------------------
+ExecStart=/usr/local/bin/awg-easy-rs
+
+# EnvironmentFile is optional (leading '-'): the binary has working defaults and
+# the setup wizard can seed the first admin if the file is absent.
+EnvironmentFile=-/etc/awg-easy-rs/awg-easy-rs.env
+
+# Best-effort module load before the binary starts. The leading '-' means a
+# failure here (e.g. module built into the kernel, or not yet built after a
+# kernel upgrade) does NOT block startup: the binary retries via CAP_SYS_MODULE
+# and, failing that, still serves the web UI so the operator can recover.
+ExecStartPre=-/sbin/modprobe amneziawg
+
+# Give awg-quick's teardown time to run cleanly on stop/restart.
+TimeoutStopSec=30s
+KillMode=mixed
+
+# File-descriptor ceiling. The DPI proxy uses one backend UDP socket per
+# active session, so the fd count tracks the admin "Max sessions" setting
+# (default 2048). 65536 covers the default comfortably; if you raise Max
+# sessions toward its 65536 cap, raise this to match (e.g. 131072).
+LimitNOFILE=65536
+
+# --- Hardening ---------------------------------------------------------------
+# Kept deliberately moderate. awg-easy-rs shells out to `awg-quick`, which in
+# turn runs `ip`, `iptables`/`nft`, and `sysctl`, and writes generated configs
+# under /etc/wireguard. Over-tight sandboxing breaks those, so the directives
+# below are the strongest set that still lets the interface come up.
+#
+# Do NOT add any of the following — each one would break a required operation:
+#   * ProtectKernelModules=yes  → blocks modprobe amneziawg (needs CAP_SYS_MODULE)
+#   * ProtectKernelTunables=yes → blocks sysctl net.ipv4.ip_forward writes
+#   * PrivateNetwork=yes        → hides the interface/namespace entirely
+#   * RestrictAddressFamilies=  → blocks AF_NETLINK used to program the interface
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+# ProtectSystem=full makes /etc read-only; carve out the paths the service must
+# write. WG_EASY_CONF_DIR (default /etc/wireguard) holds awg0.conf, the SQLite
+# DB (durable, IN_MEMORY=false on bare metal), and the extracted subprocess
+# working dirs (xray/, mtproxy/, dns/, mdnsvpn/).
+ReadWritePaths=/etc/wireguard
+ReadWritePaths=-/etc/awg-easy-rs
+ReadWritePaths=-/var/lib/awg-easy-rs
+ReadWritePaths=-/proc/sys/net
+
+# --- Environment defaults ----------------------------------------------------
+# Bare-metal durable install: keep the roster on disk rather than in RAM.
+# Anything set in EnvironmentFile overrides these.
+Environment=IN_MEMORY=false
+Environment=WG_EASY_CONF_DIR=/etc/wireguard
+Environment=WG_EASY_DB_PATH=/etc/wireguard/wg-easy.db
+Environment=PORT=51821
+Environment=HOST=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target

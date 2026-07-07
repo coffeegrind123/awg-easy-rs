@@ -15,6 +15,7 @@ pub mod setup;
 pub mod dns;
 pub mod mdnsvpn;
 pub mod mtproxy;
+pub mod proxy;
 pub mod xray;
 
 use axum::extract::FromRef;
@@ -280,6 +281,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/admin/mtproxy/users/:username/qrcode.svg",
             axum::routing::get(mtproxy::user_qrcode),
+        )
+        // DPI-imitation proxy (in-process, fronts the AmneziaWG UDP port)
+        .route(
+            "/admin/proxy/settings",
+            axum::routing::get(proxy::get_settings).post(proxy::update_settings),
+        )
+        .route(
+            "/admin/proxy/status",
+            axum::routing::get(proxy::supervisor_status),
+        )
+        .route(
+            "/admin/proxy/restart",
+            axum::routing::post(proxy::restart),
         )
         // MasterDnsVPN (DNS-tunnel mode) — admin inbound + supervisor
         .route(

@@ -1460,6 +1460,121 @@ async function showAdminTab(tab, e) {
             <button type="submit" class="btn btn--primary">Save changes</button>
           </div>
         </form>`;
+    } else if (tab === 'proxy') {
+      const s = await GET('/api/admin/proxy/settings');
+      const status = await GET('/api/admin/proxy/status').catch(() => null);
+      const stateLabel = status ? (
+        status.state === 'running' ? `<span class="pill pill--ok">Running · ${esc(status.protocol||'')} · ${esc(status.listen||'')} → ${esc(status.backend||'')} · ${Math.round(status.uptime_seconds || 0)}s</span>`
+        : status.state === 'crashed' ? `<span class="pill pill--err" title="${esc(status.last_error || '')}">Crashed</span>`
+        : `<span class="pill" title="${esc(status.reason || '')}">${esc(status.reason || 'Disabled')}</span>`
+      ) : '<span class="pill">unknown</span>';
+      const protos = Array.isArray(s.protocols) ? s.protocols : ['quic','dns','stun','sip','auto'];
+      const protoHelp = {
+        quic: 'QUIC 1-RTT / Version Negotiation (port 443) — safest default on QUIC/HTTP-3-heavy networks',
+        dns:  'DNS query/response (port 53) — for DNS-filtered networks; can answer real queries with forwarding on',
+        stun: 'STUN Binding traffic (port 3478) — for WebRTC / NAT-permissive networks',
+        sip:  'SIP signalling (port 5060) — for VoIP-permissive networks',
+        auto: 'Lock each client to whatever protocol it first probes for',
+      };
+      const backendHint = (s.backendPort && s.backendPort !== 0)
+        ? `AmneziaWG moves to <span class="mono">127.0.0.1:${s.backendPort}</span>`
+        : `Auto — AmneziaWG moves to <span class="mono">127.0.0.1:${esc(String(s.effectiveBackendPort ?? '?'))}</span>`;
+      el.innerHTML = `
+        <div class="notice notice--info" style="margin-bottom:14px">
+          <svg><use href="#i-shield"/></svg>
+          <div>An in-process UDP proxy that <b>fronts the AmneziaWG port</b> and rewrites each packet's S1–S4 padding so the datagrams look like a real <b>QUIC / DNS / STUN / SIP</b> service to DPI — and answers active protocol probes with valid responses. Unlike Xray / MTProxy / DNS-tunnel (separate transports), this keeps clients on the native AmneziaWG datapath. When enabled, AmneziaWG is moved to a loopback backend port (firewalled to <span class="mono">lo</span>) and the proxy binds the public port — <b>client configs don't change</b>. Bidirectional imitation needs <a href="https://www.wiresock.net/" target="_blank" rel="noopener">WireSock Secure Connect 3.5+</a> on the client.</div>
+        </div>
+        <div class="notice notice--warn" style="margin-bottom:14px">
+          <svg><use href="#i-alert"/></svg>
+          <div><b>Detection trade-off — read before enabling.</b> This is protocol <em>mimicry</em>. It helps against entropy/whitelist DPI and shallow active probes (where plain AmneziaWG reads as suspicious high-entropy UDP), but it is <b>not strictly better</b>: against an adversary who fingerprints <em>this specific tool</em> it can be <em>more</em> detectable, because the imitation adds fixed protocol markers on top of AmneziaWG's own handshake-size tells (which remain underneath). It <b>cannot weaken the encryption</b> — the proxy holds no keys and rewrites only the junk-padding bytes. Prefer <span class="mono">quic</span> (weakest static signature); <span class="mono">dns</span> and <span class="mono">sip</span> carry stronger fixed tells. With a stock (non-WireSock) client only the download direction is imitated. Leave this <b>off</b> unless you're specifically countering commodity DPI.</div>
+        </div>
+        <div style="margin-bottom:14px">Public port <span class="mono">${esc(String(s.publicPort ?? '?'))}</span> · supervisor: ${stateLabel}</div>
+        <form onsubmit="saveProxySettings(event)">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">DPI-imitation proxy</div>
+                <div class="card-sub">Settings live in <span class="mono">proxy_settings_table</span>. Saving rebinds AmneziaWG, reapplies the backend firewall lockdown, and (re)starts the proxy task.</div>
+              </div>
+              <label class="toggle ${s.enabled ? 'is-on' : ''}" title="Master switch — off returns the public port to AmneziaWG directly">
+                <input type="checkbox" id="adm-px-enabled" ${s.enabled ? 'checked' : ''}>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-label">Enabled</span>
+              </label>
+            </div>
+            <div class="card-body">
+              <div class="stack">
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-px-protocol" title="Which protocol the proxy imitates on the wire (padding transform) and answers probes as.">Imitated protocol</label>
+                    <select id="adm-px-protocol" class="mono-input">
+                      ${protos.map(p => `<option value="${esc(p)}" ${s.protocol === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+                    </select>
+                    <div class="field-hint" id="adm-px-proto-hint">${esc(protoHelp[s.protocol] || '')}</div>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-px-backend" title="Loopback port AmneziaWG is rebound to while the proxy fronts the public port. 0 = auto (public port ± 1).">Backend port (0 = auto)</label>
+                    <input type="number" id="adm-px-backend" class="mono-input" value="${s.backendPort || 0}" min="0" max="65535">
+                    <div class="field-hint">${backendHint}</div>
+                  </div>
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${s.quicHandshake ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-px-quic-hs" ${s.quicHandshake ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="QUIC/auto only. When on, a QUIC Initial probe gets a real TLS 1.3 server flight (self-signed cert) so the port is indistinguishable from a genuine QUIC endpoint. Off sends a stateless Version Negotiation only.">QUIC handshake responder</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-px-quic-domain" title="Hostname placed in the self-signed QUIC server certificate. Required when the handshake responder is on.">QUIC certificate domain</label>
+                  <input type="text" id="adm-px-quic-domain" class="mono-input" value="${esc(s.quicCertDomain || '')}" placeholder="e.g. www.cloudflare.com">
+                </div>
+                <div class="field field--inline">
+                  <label class="toggle ${s.dnsForward ? 'is-on' : ''}">
+                    <input type="checkbox" id="adm-px-dns-fwd" ${s.dnsForward ? 'checked' : ''}>
+                    <span class="toggle-track"></span>
+                  </label>
+                  <div>
+                    <label class="field-label" title="DNS/auto only. When on, a DNS probe is forwarded to a real upstream resolver and the genuine answer returned, so the port doubles as a working resolver. Off returns a synthetic SERVFAIL.">Answer DNS probes for real (forward)</label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="adm-px-dns-up" title="Upstream resolver host:port used when DNS forwarding is on.">DNS upstream</label>
+                  <input type="text" id="adm-px-dns-up" class="mono-input" value="${esc(s.dnsUpstream || '')}" placeholder="1.1.1.1:53">
+                </div>
+                <div class="split">
+                  <div class="field">
+                    <label class="field-label" for="adm-px-max-sessions" title="Max concurrent proxy sessions. Each is one backend socket (fd) + one relay task, so this caps the blast radius of a spoofed-source flood. Lower on small servers.">Max sessions</label>
+                    <input type="number" id="adm-px-max-sessions" class="mono-input" value="${s.maxSessions || 2048}" min="16" max="65536">
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="adm-px-session-ttl" title="Seconds an idle session is held before reaping. Lower frees fds/slots from spoofed junk sessions sooner.">Session TTL (s)</label>
+                    <input type="number" id="adm-px-session-ttl" class="mono-input" value="${s.sessionTtl || 120}" min="15" max="3600">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="save-bar">
+            <span class="changed">Saving restarts AmneziaWG (brief blip) and rebinds the proxy</span>
+            <div class="save-bar-spacer"></div>
+            <button type="button" class="btn btn--ghost" onclick="restartProxy()"><svg><use href="#i-refresh"/></svg> Restart proxy</button>
+            <button type="submit" class="btn btn--primary">Save changes</button>
+          </div>
+        </form>`;
+      const protoSel = $('adm-px-protocol');
+      if (protoSel) protoSel.addEventListener('change', () => {
+        const hint = $('adm-px-proto-hint');
+        if (hint) hint.textContent = ({
+          quic: 'QUIC 1-RTT / Version Negotiation (port 443) — safest default on QUIC/HTTP-3-heavy networks',
+          dns:  'DNS query/response (port 53) — for DNS-filtered networks; can answer real queries with forwarding on',
+          stun: 'STUN Binding traffic (port 3478) — for WebRTC / NAT-permissive networks',
+          sip:  'SIP signalling (port 5060) — for VoIP-permissive networks',
+          auto: 'Lock each client to whatever protocol it first probes for',
+        })[protoSel.value] || '';
+      });
     } else if (tab === 'mdnsvpn') {
       const inbound = await GET('/api/admin/mdnsvpn/inbound');
       const status = await GET('/api/admin/mdnsvpn/status').catch(() => null);
@@ -2237,6 +2352,47 @@ async function restartMtproxy() {
     await POST('/api/admin/mtproxy/restart', {});
     showToast('telemt restarted', 'success');
     showAdminTab('mtproxy');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function saveProxySettings(e) {
+  e.preventDefault();
+  const body = {
+    enabled: $('adm-px-enabled').checked,
+    protocol: $('adm-px-protocol').value,
+    backendPort: parseInt($('adm-px-backend').value, 10) || 0,
+    quicHandshake: $('adm-px-quic-hs').checked,
+    quicCertDomain: $('adm-px-quic-domain').value.trim(),
+    dnsForward: $('adm-px-dns-fwd').checked,
+    dnsUpstream: $('adm-px-dns-up').value.trim(),
+    maxSessions: parseInt($('adm-px-max-sessions').value, 10) || 2048,
+    sessionTtl: parseInt($('adm-px-session-ttl').value, 10) || 120,
+  };
+  // Fail fast on the most likely mistakes before the round-trip.
+  if (body.backendPort !== 0 && (body.backendPort < 1 || body.backendPort > 65535)) {
+    showToast('Backend port must be 0 (auto) or 1..65535', 'error');
+    return;
+  }
+  if (body.quicHandshake && (body.protocol === 'quic' || body.protocol === 'auto') && !body.quicCertDomain) {
+    showToast('QUIC handshake responder needs a certificate domain', 'error');
+    return;
+  }
+  if (body.dnsForward && body.dnsUpstream && !/^[^\s]+:\d{1,5}$/.test(body.dnsUpstream)) {
+    showToast('DNS upstream must be host:port (e.g. 1.1.1.1:53)', 'error');
+    return;
+  }
+  try {
+    await POST('/api/admin/proxy/settings', body);
+    showToast('Saved · AmneziaWG rebound', 'success');
+    showAdminTab('proxy');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function restartProxy() {
+  try {
+    await POST('/api/admin/proxy/restart', {});
+    showToast('Proxy restarted', 'success');
+    showAdminTab('proxy');
   } catch(e) { showToast(e.message, 'error'); }
 }
 

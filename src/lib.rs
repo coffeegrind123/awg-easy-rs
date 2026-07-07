@@ -14,6 +14,7 @@ pub mod memexec;
 pub mod mdnsvpn;
 pub mod mtproxy;
 pub mod proc;
+pub mod proxy;
 pub mod qr;
 pub mod wg;
 pub mod xray;
