@@ -2153,8 +2153,8 @@ mod tests {
             pkt[5] = 8;
         }
         // bytes 6..14: DCID (arbitrary non-zero)
-        for i in 6..std::cmp::min(14, s4) {
-            pkt[i] = 0xAB;
+        for byte in pkt.iter_mut().take(std::cmp::min(14, s4)).skip(6) {
+            *byte = 0xAB;
         }
         if s4 > 14 {
             pkt[14] = 0;
@@ -2162,7 +2162,7 @@ mod tests {
         // Append H4 header (LE u32) then body to meet TransportData minimum size.
         pkt.extend_from_slice(&h4_value.to_le_bytes());
         // Body: needs at least WG_TRANSPORT_DATA_MIN_SIZE (32) bytes after s4.
-        pkt.extend(std::iter::repeat(0xBBu8).take(32));
+        pkt.extend(std::iter::repeat_n(0xBBu8, 32));
         pkt
     }
 
@@ -2194,7 +2194,7 @@ mod tests {
         pos += 2;
         pkt[pos..pos + 2].copy_from_slice(&[0x00, 0x01]); // QCLASS IN
         pkt.extend_from_slice(&params.h4.min.to_le_bytes());
-        pkt.extend(std::iter::repeat(0xBBu8).take(32));
+        pkt.extend(std::iter::repeat_n(0xBBu8, 32));
         pkt
     }
 
