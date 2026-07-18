@@ -278,7 +278,17 @@ For upgrades between awg-easy-rs versions, idempotent `ALTER TABLE` migrations a
 
 ## Building from source
 
-Requires **Rust 1.80+** (uses `LazyLock`, `OnceLock`, edition 2021).
+The toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (currently **1.95.0**); rustup installs that exact stable automatically when you build in the repo, so CI, dev machines, and the Docker builder all compile with the same `rustc`. The code itself needs 1.80+ (`LazyLock`, `OnceLock`, edition 2021).
+
+### Dependency policy (frozen + gated)
+
+Builds are reproducible down to the crate: [`Cargo.lock`](Cargo.lock) is committed, and every build path (`Dockerfile`, `scripts/install.sh`, CI) passes `--locked` so a build **fails** rather than silently resolving to versions that weren't tested. A [`deny.toml`](deny.toml) enforced by [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) in CI is the "known-good versions" gate — it fails on any RUSTSEC advisory, a yanked crate, a license outside an explicit allowlist, an unexpected duplicate crate version, or a non-crates.io source. Run it locally with:
+
+```bash
+cargo deny check
+```
+
+The tree is deliberately lean (~150 crates in the release build): 2FA is hand-rolled HMAC-SHA1 TOTP (RFC 6238) over `hmac`/`sha1` rather than a TOTP crate dragging in the `url`/ICU stack; the Reality dest-probe extracts cert SANs with a small in-house DER walk instead of a full X.509 parser; date handling uses `time` (already required transitively) rather than a second `chrono` tree; and randomness comes straight from the OS CSPRNG via `getrandom` (see `src/rng.rs`) instead of the `rand` userspace generator.
 
 The bundled binary blobs (`vendor/*.gz`) are **not** committed to the repo — they're CI artifacts produced from the audited pin files in `vendor/*_VERSION`. To get a fully-bundled release binary, run:
 
@@ -299,7 +309,7 @@ For a quick iterating-on-Rust loop without re-fetching upstreams, the .gz blobs 
 ```bash
 scripts/build.sh --cargo-only          # use cached vendor blobs
 scripts/build.sh --skip tor --skip xray  # skip specific binaries
-cargo test                              # 250+ tests, ~3 minutes
+cargo test                              # 480+ tests, ~3 minutes
 cargo build                             # plain debug build
                                         # (build.rs is tolerant of
                                         # missing blobs — code paths
@@ -351,7 +361,7 @@ sudo ./target/x86_64-unknown-linux-musl/release/awg-easy-rs
 │  Axum 0.7 ──── HTTP server                                   │
 │  rusqlite ──── SQLite (WAL, FK on)                           │
 │  argon2 ────── password hashing                              │
-│  totp-rs ───── 2FA                                           │
+│  hmac+sha1 ─── in-house RFC 6238 TOTP 2FA                    │
 │  qrcode ────── SVG QR (vless:// + tg:// + mdnsvpn:// + AWG)  │
 │  tokio-rustls ─ TLS 1.3 dest probe for Reality               │
 │                                                              │
@@ -396,6 +406,8 @@ src/
                    #  dns_bundle, mtproxy_inbound, mtproxy_users,
                    #  mdnsvpn_inbound, mdnsvpn_clients, …)
   auth.rs          # Argon2id wrappers, SHA-256, session-token gen
+  datetime.rs      # RFC 3339 / expiry helpers over `time` (no chrono)
+  rng.rs           # OS CSPRNG + unbiased int ranges over `getrandom` (no rand)
   qr.rs            # SVG QR codes
   firewall.rs      # native nftables; manages inet awg-easy-rs table:
                    #   wg-clients chain (per-peer rules)
@@ -411,7 +423,7 @@ src/
     keys.rs        # `xray x25519` wrapper + UUID/short-id generators
     config_gen.rs  # server.json generator (multi-client, per-peer sid)
     share.rs       # vless:// URL builder + Amnezia JSON template
-    probe.rs       # TLS 1.3 dest probe (rustls + x509-parser)
+    probe.rs       # TLS 1.3 dest probe (rustls + in-house DER SAN parse)
     supervisor.rs  # tokio::process::Child + SIGHUP/SIGTERM lifecycle
     mod.rs
   mtproxy/         # — Telegram MTProxy (telemt) —
@@ -470,7 +482,11 @@ scripts/
                         # vendor/update.sh per pinned binary, then runs
                         # cargo build --release --target …-musl
 .github/workflows/
-  build-release.yml     # CI version of the above + tag + GitHub release
+  build-release.yml     # CI: cargo-deny gate → clippy/test → musl build
+                        # + tag + GitHub release
+deny.toml               # cargo-deny policy: advisories, license allowlist,
+                        # duplicate-version allowlist, crates.io-only sources
+rust-toolchain.toml     # pins rustc (reproducible builds)
 ```
 
 ---

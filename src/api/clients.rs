@@ -18,7 +18,6 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -187,7 +186,7 @@ fn client_to_json(client: &db::Client, peers: &[wg::cli::PeerDump]) -> Value {
         // Runtime data from wg dump
         "transferRx": peer.map(|p| p.transfer_rx).unwrap_or(0),
         "transferTx": peer.map(|p| p.transfer_tx).unwrap_or(0),
-        "latestHandshakeAt": peer.and_then(|p| p.latest_handshake.map(|d| d.to_rfc3339())),
+        "latestHandshakeAt": peer.and_then(|p| p.latest_handshake.map(crate::datetime::to_rfc3339)),
         "endpoint": peer.and_then(|p| p.endpoint.clone()),
         "oneTimeLink": one_time_link,
     })
@@ -247,10 +246,7 @@ pub async fn create_client(
     validate_client_name(&body.name)
         .map_err(|m| api_err(StatusCode::BAD_REQUEST, &m))?;
     if let Some(ref expires) = body.expires_at {
-        let ok = chrono::DateTime::parse_from_rfc3339(expires).is_ok()
-            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M").is_ok()
-            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M:%S").is_ok();
-        if !ok {
+        if !crate::datetime::is_valid_expiry(expires) {
             return Err(api_err(
                 StatusCode::BAD_REQUEST,
                 "Invalid date format for expiresAt. Use ISO 8601 format.",
@@ -430,11 +426,8 @@ pub async fn update_client(
         }
     }
     if let Some(ref expires) = body.expires_at {
-        // Try RFC3339 first, then ISO 8601 without timezone
-        let is_valid_date = chrono::DateTime::parse_from_rfc3339(expires).is_ok()
-            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M").is_ok()
-            || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M:%S").is_ok();
-        if !is_valid_date {
+        // RFC3339, or ISO 8601 datetime-local (with/without seconds).
+        if !crate::datetime::is_valid_expiry(expires) {
             return Err(api_err(StatusCode::BAD_REQUEST, "Invalid date format for expiresAt. Use ISO 8601 format."));
         }
     }
@@ -807,23 +800,19 @@ pub async fn generate_one_time_link(
     // Generate CSPRNG-based token (validate config generation)
     let _config = wg::get_client_config(client_id).map_err(map_err)?;
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    crate::rng::fill(&mut bytes);
     let token = hex::encode(bytes);
 
     // Expire in 5 minutes
-    let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let expires =
+        crate::datetime::to_rfc3339(crate::datetime::now_utc() + time::Duration::minutes(5));
 
-    db::create_one_time_link(
-        client_id,
-        &token,
-        &expires.to_rfc3339(),
-    )
-    .map_err(map_err)?;
+    db::create_one_time_link(client_id, &token, &expires).map_err(map_err)?;
 
     Ok(Json(json!({
         "success": true,
         "token": token,
-        "expiresAt": expires.to_rfc3339(),
+        "expiresAt": expires,
     })))
 }
 

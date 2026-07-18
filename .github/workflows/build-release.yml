@@ -24,11 +24,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Dependency policy gate — runs first (needs no toolchain or vendor
+      # blobs) so a supply-chain problem fails the run in seconds rather than
+      # after the multi-minute build. Enforces deny.toml: RUSTSEC advisories,
+      # yanked crates, the license allowlist, the duplicate-version allowlist,
+      # and crates.io-only sources. The action pins and caches cargo-deny.
+      - name: Dependency policy (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
       # Rustup ships with the runner; we just need the musl target +
       # musl-tools (provides the musl-gcc linker our RUSTFLAGS asks
-      # for) and the clippy component for the quality gate. Toolchain
-      # version follows the runner's pre-installed stable Rust — pin via
-      # rust-toolchain.toml if reproducibility across versions matters.
+      # for) and the clippy component for the quality gate. The toolchain
+      # version is pinned by rust-toolchain.toml, which rustup honours here
+      # (auto-installing that exact stable), so CI, dev, and the Docker
+      # builder all compile with the same rustc.
       - name: Install Rust musl target + clippy + musl-tools
         run: |
           rustup target add x86_64-unknown-linux-musl

@@ -39,7 +39,11 @@ COPY vendor/ ./vendor/
 # the binary runs unchanged on glibc, musl, or any other libc x86_64
 # Linux distro — verified by docker cp into debian:stable-slim.
 ENV RUSTFLAGS="-C target-feature=+crt-static -C linker=musl-gcc -C relocation-model=static"
-RUN cargo build --release --target x86_64-unknown-linux-musl && \
+# `--locked` freezes the build to the committed Cargo.lock: if anything would
+# change the lock (a yanked crate, a would-be minor bump), the build fails
+# instead of silently resolving to different versions than were tested. Matches
+# `scripts/install.sh`, which already builds with `--locked`.
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl && \
     strip target/x86_64-unknown-linux-musl/release/awg-easy-rs && \
     cp target/x86_64-unknown-linux-musl/release/awg-easy-rs /build/awg-easy-rs
 

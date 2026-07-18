@@ -29,7 +29,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
-use x509_parser::prelude::FromDer;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(7);
 
@@ -158,25 +157,131 @@ pub async fn probe_dest(dest: &str, sni: &str) -> Result<ProbeReport> {
     })
 }
 
+/// Minimal DER TLV reader — just enough to walk an X.509 certificate to its
+/// SubjectAlternativeName extension. Not a general ASN.1 parser: it handles
+/// definite-length short/long form and single-byte tags, which is everything a
+/// DER-encoded certificate uses (BER indefinite length is illegal in DER).
+/// Replaces the `x509-parser` crate — and its `asn1-rs`/`der-parser`/`nom`/
+/// `oid-registry` subtree — for our single need: reading dNSName SANs.
+///
+/// Returns `(tag, value, rest)` where `rest` is the bytes following this whole
+/// TLV, or `None` on truncated/malformed input.
+fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, after_tag) = input.split_first()?;
+    let (&len_byte, after_len_byte) = after_tag.split_first()?;
+    let (len, body) = if len_byte < 0x80 {
+        // Short form: length is the byte itself.
+        (len_byte as usize, after_len_byte)
+    } else {
+        // Long form: low 7 bits give the number of subsequent length bytes.
+        // 0x80 (indefinite) is illegal in DER; cap at 4 bytes (>4 GiB is absurd
+        // for a cert and would risk usize overflow on 32-bit).
+        let num = (len_byte & 0x7f) as usize;
+        if num == 0 || num > 4 || after_len_byte.len() < num {
+            return None;
+        }
+        let (len_bytes, rest) = after_len_byte.split_at(num);
+        let mut len = 0usize;
+        for &b in len_bytes {
+            len = (len << 8) | b as usize;
+        }
+        (len, rest)
+    };
+    if body.len() < len {
+        return None;
+    }
+    let (value, rest) = body.split_at(len);
+    Some((tag, value, rest))
+}
+
 /// Pull SANs out of a DER-encoded certificate. Returns dNSName entries
 /// (the only kind Reality cares about); we silently drop other GeneralName
 /// variants like rfc822Name or iPAddress.
+///
+/// Structure walked (RFC 5280):
+///   Certificate ::= SEQUENCE { tbsCertificate, sigAlg, sigValue }
+///   TBSCertificate ::= SEQUENCE { version[0], serial, ..., extensions[3] }
+///   Extensions ::= SEQUENCE OF Extension
+///   Extension ::= SEQUENCE { extnID OID, critical BOOLEAN?, extnValue OCTETSTRING }
+///   SAN extnValue wraps GeneralNames ::= SEQUENCE OF GeneralName
+///   dNSName is context tag [2] IMPLICIT IA5String → DER tag 0x82.
 fn extract_sans(der: &[u8]) -> Result<Vec<String>> {
-    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der)
-        .map_err(|e| anyhow!("parse leaf cert: {e}"))?;
-    let mut out = Vec::new();
-    for ext in cert.extensions() {
-        if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
-            ext.parsed_extension()
-        {
-            for name in &san.general_names {
-                if let x509_parser::extensions::GeneralName::DNSName(dn) = name {
-                    out.push(dn.to_string());
-                }
+    // 2.5.29.17 encoded as OID content bytes (the 0x06/len header is stripped
+    // by read_tlv): 2*40+5 = 0x55, 29 = 0x1d, 17 = 0x11.
+    const SAN_OID: &[u8] = &[0x55, 0x1d, 0x11];
+
+    let (cert_tag, cert_body, _) =
+        read_tlv(der).ok_or_else(|| anyhow!("parse leaf cert: not a TLV"))?;
+    if cert_tag != 0x30 {
+        return Err(anyhow!("parse leaf cert: expected SEQUENCE"));
+    }
+    let (tbs_tag, tbs, _) =
+        read_tlv(cert_body).ok_or_else(|| anyhow!("parse leaf cert: missing TBSCertificate"))?;
+    if tbs_tag != 0x30 {
+        return Err(anyhow!("parse leaf cert: TBSCertificate not a SEQUENCE"));
+    }
+
+    // Scan TBS children for the [3] EXPLICIT extensions wrapper (0xA3).
+    let mut cur = tbs;
+    let ext_wrapper = loop {
+        let Some((t, v, rest)) = read_tlv(cur) else {
+            return Ok(Vec::new()); // no extensions field at all
+        };
+        if t == 0xA3 {
+            break v;
+        }
+        cur = rest;
+    };
+    // [3] wraps a single SEQUENCE OF Extension.
+    let (seq_tag, extensions, _) =
+        read_tlv(ext_wrapper).ok_or_else(|| anyhow!("parse leaf cert: bad extensions"))?;
+    if seq_tag != 0x30 {
+        return Err(anyhow!("parse leaf cert: extensions not a SEQUENCE"));
+    }
+
+    let mut cur = extensions;
+    while let Some((ext_tag, ext, rest)) = read_tlv(cur) {
+        cur = rest;
+        if ext_tag != 0x30 {
+            continue;
+        }
+        let Some((oid_tag, oid, after_oid)) = read_tlv(ext) else {
+            continue;
+        };
+        if oid_tag != 0x06 || oid != SAN_OID {
+            continue;
+        }
+        // Reach extnValue, skipping the optional critical BOOLEAN.
+        let (mut vtag, mut val, mut vrest) =
+            read_tlv(after_oid).ok_or_else(|| anyhow!("parse leaf cert: SAN missing extnValue"))?;
+        if vtag == 0x01 {
+            (vtag, val, vrest) = read_tlv(vrest)
+                .ok_or_else(|| anyhow!("parse leaf cert: SAN extnValue after critical"))?;
+        }
+        let _ = vrest;
+        if vtag != 0x04 {
+            return Err(anyhow!("parse leaf cert: SAN extnValue not an OCTET STRING"));
+        }
+        // OCTET STRING wraps the GeneralNames SEQUENCE.
+        let (gn_tag, general_names, _) =
+            read_tlv(val).ok_or_else(|| anyhow!("parse leaf cert: bad GeneralNames"))?;
+        if gn_tag != 0x30 {
+            return Err(anyhow!("parse leaf cert: GeneralNames not a SEQUENCE"));
+        }
+        let mut out = Vec::new();
+        let mut gcur = general_names;
+        while let Some((name_tag, name, grest)) = read_tlv(gcur) {
+            gcur = grest;
+            // dNSName [2] IMPLICIT IA5String. IA5 is ASCII; from_utf8_lossy is
+            // safe — a non-ASCII dNSName is malformed and we'd reject the SNI
+            // match anyway.
+            if name_tag == 0x82 {
+                out.push(String::from_utf8_lossy(name).into_owned());
             }
         }
+        return Ok(out);
     }
-    Ok(out)
+    Ok(Vec::new()) // no SAN extension present
 }
 
 /// SAN matches SNI by RFC 6125: literal equality OR a leading `*.`
@@ -343,6 +448,38 @@ mod tests {
         assert!(san_matches("www.microsoft.com", "www.microsoft.com"));
         assert!(san_matches("WWW.MICROSOFT.COM", "www.microsoft.com"));
         assert!(!san_matches("www.microsoft.com", "microsoft.com"));
+    }
+
+    #[test]
+    fn extract_sans_reads_dns_names_from_real_cert() {
+        // Generate a genuine DER cert with rcgen (already a dependency) so the
+        // hand-rolled DER walk is tested against a real-world encoder, not a
+        // hand-crafted fixture.
+        let ck = rcgen::generate_simple_self_signed(vec![
+            "example.com".to_string(),
+            "*.example.com".to_string(),
+            "learn.microsoft.com".to_string(),
+        ])
+        .unwrap();
+        let der = ck.cert.der();
+        let mut sans = extract_sans(der.as_ref()).unwrap();
+        sans.sort();
+        assert_eq!(
+            sans,
+            vec![
+                "*.example.com".to_string(),
+                "example.com".to_string(),
+                "learn.microsoft.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_sans_empty_on_garbage() {
+        // A non-SEQUENCE first byte must error, not panic.
+        assert!(extract_sans(&[0x02, 0x01, 0x00]).is_err());
+        // Truncated length must be handled gracefully.
+        assert!(read_tlv(&[0x30, 0x82, 0x00]).is_none());
     }
 
     #[test]

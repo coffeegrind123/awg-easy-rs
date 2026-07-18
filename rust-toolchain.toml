@@ -1,0 +1,12 @@
+# Pin the compiler alongside Cargo.lock so a "reproducible build" is exactly
+# that: the same source, the same crate versions, AND the same rustc. Without
+# this, dev machines and CI silently follow whichever stable they happen to
+# have installed. Bump this deliberately (and re-run `cargo test`) rather than
+# drifting.
+#
+# rustup auto-installs this toolchain when any cargo/rustc command runs inside
+# the repo. The Dockerfile's `rust:1-alpine` builder is pinned by digest and
+# will fetch this exact version if it differs.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"

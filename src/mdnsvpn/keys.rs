@@ -11,7 +11,6 @@
 //! are just bookkeeping for the share-link UX.
 
 use anyhow::{anyhow, Result};
-use rand::RngCore;
 
 /// Length (in hex characters) of a freshly-generated key. 32 chars = 16
 /// raw bytes — what upstream `mdnsvpn -genkey` produces. The encryption
@@ -29,7 +28,7 @@ pub const MIN_KEY_HEX_LEN: usize = 16;
 /// passwords + AmneziaWG private keys).
 pub fn generate_key() -> String {
     let mut bytes = [0u8; DEFAULT_KEY_HEX_LEN / 2];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    crate::rng::fill(&mut bytes);
     hex::encode(bytes)
 }
 

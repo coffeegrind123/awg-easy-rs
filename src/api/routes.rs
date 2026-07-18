@@ -114,8 +114,8 @@ pub async fn one_time_link(
 
     // Check expiry
     if let Some(ref expires) = link.expires_at {
-        if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(expires) {
-            if chrono::Utc::now() > exp {
+        if let Some(exp) = crate::datetime::parse_rfc3339(expires) {
+            if crate::datetime::now_utc() > exp {
                 // Remove expired link
                 let _ = db::delete_one_time_link(link.id);
                 return Err(api_err(StatusCode::GONE, "One-time link has expired"));
@@ -180,7 +180,7 @@ pub async fn metrics_json(
                 "enabled": client.enabled,
                 "transferRx": peer.map(|p| p.transfer_rx).unwrap_or(0),
                 "transferTx": peer.map(|p| p.transfer_tx).unwrap_or(0),
-                "latestHandshakeAt": peer.and_then(|p| p.latest_handshake.map(|d| d.to_rfc3339())),
+                "latestHandshakeAt": peer.and_then(|p| p.latest_handshake.map(crate::datetime::to_rfc3339)),
                 "endpoint": peer.and_then(|p| p.endpoint.clone()),
                 "online": peer.map(|p| p.latest_handshake.is_some()).unwrap_or(false),
             })
@@ -256,7 +256,7 @@ pub async fn metrics_prometheus(
         let tx = peer.map(|p| p.transfer_tx).unwrap_or(0);
         let hs = peer
             .and_then(|p| p.latest_handshake)
-            .map(|d| d.timestamp())
+            .map(|d| d.unix_timestamp())
             .unwrap_or(0);
         let online = if peer.map(|p| p.latest_handshake.is_some()).unwrap_or(false) { 1 } else { 0 };
 

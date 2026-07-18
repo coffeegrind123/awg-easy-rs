@@ -3,7 +3,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use ipnet::{Ipv4Net, Ipv6Net};
-use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -1706,7 +1705,7 @@ fn seed_if_empty(conn: &Connection) -> Result<()> {
 
     // Generate a random 512-character session password (256 bytes hex-encoded).
     let mut rand_bytes = [0u8; 256];
-    rand::rngs::OsRng.fill_bytes(&mut rand_bytes);
+    crate::rng::fill(&mut rand_bytes);
     let session_pass = hex::encode(rand_bytes);
 
     // interfaces_table default
@@ -1964,7 +1963,7 @@ pub fn snapshot_to(dst_path: &str) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let mut rand_suffix = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut rand_suffix);
+    crate::rng::fill(&mut rand_suffix);
     let base = Path::new(dst_path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -2636,7 +2635,7 @@ pub fn delete_one_time_link(client_id: i64) -> Result<()> {
 /// and the foreign-key reference into clients_table), so this is a unique
 /// lookup. Returns None when no link exists or the link has expired.
 pub fn get_active_one_time_link(client_id: i64) -> Result<Option<OneTimeLink>> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::datetime::now_rfc3339();
     let c = conn();
     let row = c
         .query_row(

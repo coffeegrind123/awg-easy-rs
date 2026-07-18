@@ -1,0 +1,73 @@
+# cargo-deny policy — the "only known-good versions" gate.
+#
+# Run locally with `cargo deny check`; enforced in CI (build-release.yml).
+# It fails the build on: a RUSTSEC advisory, a yanked crate, a license outside
+# the allowlist, an unexpected duplicate crate version, a wildcard/git/unknown
+# source. Everything it allows is enumerated below with the reason, so drift is
+# a conscious edit rather than a silent default.
+
+[graph]
+# Evaluate the platforms we actually ship (static x86_64-linux). This keeps
+# Windows/wasm-only transitive crates — never compiled into our binary — out of
+# the license and duplicate analysis.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+all-features = false
+
+[advisories]
+# Fail on any RUSTSEC advisory and on yanked crates. `ignore` stays empty on
+# purpose: an advisory should be fixed (bump/replace), not silenced. Add an
+# entry here only with a written justification and a tracking link.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Explicit allowlist. Every entry is required by a crate actually in the tree
+# (the crate is named in the comment). Pulling in a dependency under a new
+# license fails CI until this list is consciously extended.
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",                            # bulk of the tree + this crate
+    "Apache-2.0",                     # bulk of the tree (covers rustix/linux-raw-sys via OR)
+    "ISC",                            # rustls-webpki, untrusted, ring (AND ISC)
+    "BSD-2-Clause",                   # zerocopy
+    "BSD-3-Clause",                   # subtle; matchit/encoding_rs (AND)
+    "Zlib",                           # foldhash
+    "Unicode-3.0",                    # unicode-ident (AND)
+    "CDLA-Permissive-2.0",            # webpki-roots (Mozilla CA bundle data)
+    "BSL-1.0",                        # ryu (OR)
+    "0BSD",                           # adler2 (OR)
+    "Unlicense",                      # memchr, aho-corasick (OR)
+]
+
+[licenses.private]
+# This workspace crate is unpublished and carries `license = "MIT"`; ignore it
+# so cargo-deny never demands third-party-style attribution for our own code.
+ignore = true
+
+[bans]
+# Duplicate major versions are denied so a careless dep bump that forks a common
+# crate into two compiled copies trips CI. The `skip` list is every duplicate
+# that exists TODAY — all forced by transitive deps we don't control (the second
+# copy's puller is noted). A NEW duplicate, or the disappearance of one of
+# these, surfaces here for a conscious decision.
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { crate = "thiserror@1.0.69" },      # quinn-proto pulls v2; rest still v1
+    { crate = "thiserror-impl@1.0.69" }, # proc-macro half of the same split
+    { crate = "getrandom@0.2.17" },      # argon2/password-hash chain; uuid/quinn pull 0.4
+    { crate = "rand_core@0.6.4" },       # argon2/password-hash; quinn's rand pulls 0.10
+    { crate = "cpufeatures@0.2.17" },    # sha2/sha1/argon2; quinn's chacha20 pulls 0.3
+]
+
+[sources]
+# Only the public crates.io registry is trusted. A git or alternate-registry
+# dependency must be added here deliberately.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

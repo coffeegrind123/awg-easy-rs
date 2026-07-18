@@ -105,7 +105,7 @@ pub fn awg_sync(name: &str) -> Result<()> {
 pub struct PeerDump {
     pub public_key: String,
     pub endpoint: Option<String>,
-    pub latest_handshake: Option<chrono::DateTime<chrono::Utc>>,
+    pub latest_handshake: Option<time::OffsetDateTime>,
     pub transfer_rx: i64,
     pub transfer_tx: i64,
 }
@@ -127,9 +127,7 @@ pub fn awg_dump(name: &str) -> Result<Vec<PeerDump>> {
                 fields[4]
                     .parse::<i64>()
                     .ok()
-                    .and_then(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                    })
+                    .and_then(crate::datetime::from_unix)
             };
             peers.push(PeerDump {
                 public_key: fields[0].to_string(),

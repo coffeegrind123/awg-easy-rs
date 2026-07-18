@@ -526,10 +526,9 @@ pub async fn toggle_totp(
                     ));
                 }
             }
-            use rand::RngCore;
             // Generate a fresh 20-byte secret per RFC 6238 recommendations.
             let mut secret = [0u8; 20];
-            rand::rngs::OsRng.fill_bytes(&mut secret);
+            crate::rng::fill(&mut secret);
             let key_b32 = base32_encode(&secret);
 
             // Build the otpauth:// URI for QR code consumption.
@@ -743,38 +742,48 @@ fn verify_totp_secret_step(
     secret: &[u8],
     code: &str,
 ) -> Result<Option<u64>, (StatusCode, Json<Value>)> {
-    use totp_rs::{Algorithm, TOTP};
-
     if !code.chars().all(|c| c.is_ascii_digit()) || code.len() != 6 {
         return Ok(None);
     }
-
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        secret.to_vec(),
-        None,
-        String::new(),
-    )
-    .map_err(|e| {
-        tracing::error!("TOTP construction failed: {e}");
-        api_err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
-    })?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // TOTP step number: floor(unix_time / period), period = 30s (RFC 6238).
     let current = now / 30;
+    // Accept ±1 step (±30s) to tolerate client/server clock drift. The matched
+    // step is returned so the caller can reject replay of an already-used code.
     for step in [current.saturating_sub(1), current, current + 1] {
-        let expected = totp.generate(step * 30);
+        let expected = hotp_sha1(secret, step);
         if ct_eq(expected.as_bytes(), code.as_bytes()) {
             return Ok(Some(step));
         }
     }
     Ok(None)
+}
+
+/// RFC 4226 HOTP with SHA-1, 6 digits — the primitive behind our RFC 6238
+/// TOTP. `counter` is the moving factor (for TOTP, `unix_time / period`).
+/// Replaces the `totp-rs` dependency, whose only use here was this exact
+/// computation; hand-rolling it drops totp-rs's entire url/idna/ICU subtree.
+fn hotp_sha1(secret: &[u8], counter: u64) -> String {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    // HMAC accepts a key of any length, so this never errors.
+    let mut mac = <Hmac<Sha1>>::new_from_slice(secret).expect("HMAC key length is unrestricted");
+    mac.update(&counter.to_be_bytes());
+    let hs = mac.finalize().into_bytes();
+
+    // Dynamic truncation (RFC 4226 §5.3): the low nibble of the last byte
+    // selects a 4-byte window; mask the top bit to stay positive.
+    let offset = (hs[19] & 0x0f) as usize;
+    let bin = (u32::from(hs[offset] & 0x7f) << 24)
+        | (u32::from(hs[offset + 1]) << 16)
+        | (u32::from(hs[offset + 2]) << 8)
+        | u32::from(hs[offset + 3]);
+    format!("{:06}", bin % 1_000_000)
 }
 
 /// Constant-time byte-slice equality (length-independent short-circuit only on
@@ -794,6 +803,34 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// RFC 4226 Appendix D reference vectors: secret is the ASCII string
+    /// "12345678901234567890" (20 bytes), 6 digits, counters 0..=9. Locks our
+    /// hand-rolled HOTP to the standard so it stays interoperable with every
+    /// authenticator app (Google Authenticator, Aegis, 1Password, …).
+    #[test]
+    fn hotp_sha1_matches_rfc4226_vectors() {
+        let secret = b"12345678901234567890";
+        let expected = [
+            "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583",
+            "399871", "520489",
+        ];
+        for (counter, want) in expected.iter().enumerate() {
+            assert_eq!(&hotp_sha1(secret, counter as u64), want, "counter {counter}");
+        }
+    }
+
+    /// RFC 6238 uses HOTP with counter = unix_time / period. Cross-check the
+    /// SHA-1 TOTP vector from RFC 6238 Appendix B (secret "12345678901234567890",
+    /// T = 59s → step 1 → code 94287082, truncated to 6 digits = 287082).
+    #[test]
+    fn totp_step_matches_rfc6238_sha1_vector() {
+        let secret = b"12345678901234567890";
+        // 59s / 30 = step 1.
+        assert_eq!(hotp_sha1(secret, 59 / 30), "287082");
+        // 1111111109s / 30 = step 37037036 → RFC vector 07081804 → 081804.
+        assert_eq!(hotp_sha1(secret, 1111111109 / 30), "081804");
+    }
 
     #[test]
     fn rate_limit_key_truncates_long_subjects() {
