@@ -17,7 +17,11 @@ services:
     volumes:
       # Durable, RAM-independent: only the DB snapshot lands here.
       - awg_data:/data
-      - /lib/modules:/lib/modules:ro
+      # NOTE: the /lib/modules mount was removed alongside the SYS_MODULE
+      # capability (see cap_drop below). amneziawg-go is a userspace WireGuard
+      # implementation that only needs /dev/net/tun (passed through under
+      # `devices`), so no in-container `modprobe` is required. Ensure the host
+      # has the `tun` module available (it does whenever /dev/net/tun exists).
     tmpfs:
       # RAM-backed runtime root. Sized for the generated configs, tor's data
       # directory, and the on-disk PT plugins (lyrebird/snowflake/webtunnel,
@@ -30,9 +34,19 @@ services:
     restart: unless-stopped
     devices:
       - /dev/net/tun:/dev/net/tun
+    # Drop the entire default Docker capability set and re-add ONLY NET_ADMIN
+    # (needed for the nftables ruleset + configuring the WireGuard interface).
+    # In particular SYS_MODULE is gone: it let the container load arbitrary
+    # kernel modules into the HOST kernel — a container-escape / host-compromise
+    # primitive — and it is not needed (see the /lib/modules note above).
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+    # Belt-and-braces: a compromised process can never regain privileges via
+    # setuid binaries even if one is ever added to the image.
+    security_opt:
+      - no-new-privileges:true
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1

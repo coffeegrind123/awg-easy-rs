@@ -28,6 +28,20 @@ fn get_i64(map: &serde_json::Map<String, Value>, key: &str) -> Option<i64> {
     map.get(key).and_then(|v| v.as_i64())
 }
 
+/// String elements of a JSON value that is expected to be an array of
+/// strings. Non-array values and non-string elements are ignored, so callers
+/// get a clean `Vec<String>` to validate before the value is JSON-re-encoded
+/// into a DB TEXT column.
+fn json_str_elements(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// A magic header is `digits` or `digits-digits` — nothing else. Both halves
 /// must be non-empty and each must fit in an `i64`.
 fn is_valid_magic_header(s: &str) -> bool {
@@ -230,7 +244,28 @@ pub async fn update_general(
             ("metricsPrometheus", "metrics_prometheus"),
             ("metricsJson", "metrics_json"),
         ];
+        // Bound the session timeout: it is later cast `as u64` in
+        // `is_expired`, so a negative value would wrap to a ~584-billion-year
+        // timeout and effectively disable session expiry. Require a sane
+        // positive range (60s … 30d).
+        if let Some(val) = map.get("sessionTimeout") {
+            let secs = val.as_i64().or_else(|| value_to_string(val).and_then(|s| s.parse().ok()));
+            match secs {
+                Some(n) if (60..=2_592_000).contains(&n) => {
+                    fields.insert("session_timeout".into(), n.to_string());
+                }
+                _ => {
+                    return Err(api_err(
+                        StatusCode::BAD_REQUEST,
+                        "sessionTimeout must be an integer between 60 and 2592000 seconds",
+                    ));
+                }
+            }
+        }
         for (json_key, db_key) in mappings {
+            if *json_key == "sessionTimeout" {
+                continue; // handled above with range validation
+            }
             if let Some(val) = map.get(*json_key) {
                 if let Some(s) = value_to_string(val) {
                     fields.insert((*db_key).into(), s);
@@ -253,6 +288,49 @@ pub async fn update_general(
                 }
                 _ => {}
             }
+        }
+
+        // Refuse to enable metrics without a password. An unauthenticated
+        // /metrics/{json,prometheus} endpoint discloses the entire client
+        // roster — names, public keys, peer endpoint IPs, and transfer stats.
+        // Compute the POST-update state (request value if present, else stored)
+        // and reject the transition that would leave metrics on but open.
+        let current = db::get_general().map_err(map_err)?;
+        // Accept bool, "true"/"1", or a non-zero number — mirrors how the
+        // value is later coerced for storage, so the guard can't be dodged by
+        // sending the flag in a different encoding.
+        let truthy = |v: &Value| -> Option<bool> {
+            match v {
+                Value::Bool(b) => Some(*b),
+                Value::Number(n) => Some(n.as_i64().unwrap_or(0) != 0),
+                Value::String(s) => Some(matches!(s.as_str(), "true" | "1")),
+                _ => None,
+            }
+        };
+        let json_on = map
+            .get("metricsJson")
+            .and_then(truthy)
+            .unwrap_or(current.metrics_json);
+        let prom_on = map
+            .get("metricsPrometheus")
+            .and_then(truthy)
+            .unwrap_or(current.metrics_prometheus);
+        let password_after = match map.get("metricsPassword") {
+            Some(Value::String(s)) => !s.is_empty(),
+            Some(Value::Null) => false,
+            _ => current
+                .metrics_password
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+        };
+        if (json_on || prom_on) && !password_after {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Set a metricsPassword before enabling metrics — the endpoint \
+                 exposes the client roster (names, public keys, peer IPs) to \
+                 anyone who can reach it",
+            ));
         }
     }
 
@@ -417,13 +495,37 @@ pub async fn update_userconfig(
                 }
             }
         }
-        // DNS array -> JSON string (accept both spellings)
+        // DNS array -> JSON string (accept both spellings). Every element
+        // must be a bare IP literal: these values are string-interpolated
+        // into the generated WireGuard `DNS = …` line, so a newline / stray
+        // token would inject config directives. (Mirrors the per-client `dns`
+        // validation in `api::clients`.)
         if let Some(val) = map.get("defaultDns").or_else(|| map.get("defaultDNS")) {
+            for e in json_str_elements(val) {
+                if e.trim().parse::<std::net::IpAddr>().is_err() {
+                    return Err(api_err(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid defaultDns entry '{e}': must be a valid IP address"),
+                    ));
+                }
+            }
             let s = serde_json::to_string(val).unwrap_or_default();
             fields.insert("default_dns".into(), s);
         }
-        // AllowedIPs array -> JSON string
+        // AllowedIPs array -> JSON string. Every element must be an IP or CIDR
+        // literal: these flow into the per-client nftables transaction
+        // (`firewall::gen_rules`, fed to `nft -f -`) and the client config.
+        // `firewall::parse_target` now also rejects non-IP tokens in-module,
+        // but we reject here too for a clear 400 instead of a silent skip.
         if let Some(val) = map.get("defaultAllowedIps") {
+            for e in json_str_elements(val) {
+                super::clients::validate_routing_entry(&e).map_err(|m| {
+                    api_err(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid defaultAllowedIps entry: {m}"),
+                    )
+                })?;
+            }
             let s = serde_json::to_string(val).unwrap_or_default();
             fields.insert("default_allowed_ips".into(), s);
         }

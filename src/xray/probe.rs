@@ -65,8 +65,17 @@ pub async fn probe_dest(dest: &str, sni: &str) -> Result<ProbeReport> {
     let (host, port) = split_host_port(dest)?;
     let mut warnings: Vec<String> = Vec::new();
 
+    // SSRF guard: resolve the dest ourselves and refuse any address in a
+    // private / loopback / link-local / carrier-NAT / ULA / metadata range.
+    // Without this the probe is a blind port/TLS scanner for the internal
+    // network (and the cloud metadata endpoint), reachable over the same web
+    // origin. We then connect to the *vetted* address — not by name — so a
+    // DNS-rebinding host can't return a public IP for the check and a private
+    // one for the connect.
+    let addr = resolve_vetted_addr(&host, port).await?;
+
     let started = Instant::now();
-    let tcp = timeout(PROBE_TIMEOUT, TcpStream::connect((host.as_str(), port)))
+    let tcp = timeout(PROBE_TIMEOUT, TcpStream::connect(addr))
         .await
         .map_err(|_| anyhow!("TCP connect to {host}:{port} timed out after {:?}", PROBE_TIMEOUT))?
         .with_context(|| format!("TCP connect to {host}:{port}"))?;
@@ -198,6 +207,65 @@ fn split_host_port(dest: &str) -> Result<(String, u16)> {
     }
 }
 
+/// True if `ip` is in a range the probe must never connect to: it would turn
+/// the admin "Probe" button into an internal-network / cloud-metadata scanner.
+/// Covers loopback, private (RFC1918), link-local (incl. 169.254.169.254
+/// metadata), carrier-grade NAT, unspecified/broadcast/documentation for v4;
+/// loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10),
+/// multicast, and IPv4-mapped (unwrapped and re-checked) for v6.
+pub(crate) fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                // Carrier-grade NAT 100.64.0.0/10 and 0.0.0.0/8.
+                || matches!(v4.octets(), [100, b, ..] if (64..=127).contains(&b))
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_forbidden_ip(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique-local fc00::/7.
+                || (seg[0] & 0xfe00) == 0xfc00
+                // Link-local fe80::/10.
+                || (seg[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Resolve `host:port` and return a single address that passed the SSRF vet.
+/// Rejects if resolution yields nothing, or if ANY resolved address is
+/// forbidden (a host that resolves to both a public and a private address is
+/// treated as hostile — the classic rebinding split).
+async fn resolve_vetted_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("resolve {host}:{port}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(anyhow!("{host}:{port} did not resolve to any address"));
+    }
+    if let Some(bad) = addrs.iter().find(|a| is_forbidden_ip(a.ip())) {
+        return Err(anyhow!(
+            "refusing to probe {host}:{port}: resolves to a private/reserved \
+             address ({}) — dest must be a public host",
+            bad.ip()
+        ));
+    }
+    Ok(addrs[0])
+}
+
 /// Curated list of dest candidates that are reachable from most
 /// jurisdictions, terminate TLS 1.3, present long-lived public CA
 /// chains, and look like organic CDN traffic. Surfaced in the admin
@@ -220,6 +288,35 @@ pub fn curated_candidates() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
+
+    #[test]
+    fn ssrf_guard_blocks_internal_ranges() {
+        for bad in [
+            "127.0.0.1",       // loopback
+            "10.0.0.5",        // RFC1918
+            "192.168.1.1",     // RFC1918
+            "172.16.0.1",      // RFC1918
+            "169.254.169.254", // link-local / cloud metadata
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",         // unspecified / 0.0.0.0/8
+            "::1",             // v6 loopback
+            "fe80::1",         // v6 link-local
+            "fc00::1",         // v6 unique-local
+            "::ffff:10.0.0.1", // v4-mapped private
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(is_forbidden_ip(ip), "must block {bad}");
+        }
+    }
+
+    #[test]
+    fn ssrf_guard_allows_public() {
+        for ok in ["1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:4700:4700::1111"] {
+            let ip: IpAddr = ok.parse().unwrap();
+            assert!(!is_forbidden_ip(ip), "must allow {ok}");
+        }
+    }
 
     #[test]
     fn split_host_port_default() {

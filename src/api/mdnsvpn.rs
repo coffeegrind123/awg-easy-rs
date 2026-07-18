@@ -18,7 +18,7 @@
 //! | GET    | /api/mdnsvpn/clients/:id/share                          | auth   | mdnsvpn://b64?<base64> share string  |
 //! | GET    | /api/mdnsvpn/clients/:id/qrcode.svg                     | auth   | QR of the share string               |
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -492,14 +492,49 @@ pub async fn update_client(
     Ok(ok_success())
 }
 
+#[derive(Deserialize, Default)]
+pub struct DeleteClientParams {
+    /// When `true`, rotate the shared encryption key as part of the delete so
+    /// the removed client's saved config actually stops working. This is the
+    /// ONLY way to revoke a MasterDnsVPN client — the protocol has a single
+    /// singleton key shared by every client, with no per-user secret and no
+    /// server-side roster, so deleting the DB row alone does not stop that
+    /// client from connecting. Rotating invalidates *all* clients (they must
+    /// re-download configs), so it is opt-in rather than automatic.
+    #[serde(default, rename = "rotateKey")]
+    pub rotate_key: bool,
+}
+
 pub async fn delete_client(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(id): Path<i64>,
+    Query(params): Query<DeleteClientParams>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _admin = require_admin(&jar, &state)?;
     db::delete_mdnsvpn_client(id).map_err(map_err)?;
-    Ok(ok_success())
+
+    if params.rotate_key {
+        let new_key = mdnsvpn::keys::generate_key();
+        db::update_mdnsvpn_encryption_key(&new_key).map_err(map_err)?;
+        reconcile_supervisor().await;
+        return Ok(Json(json!({
+            "success": true,
+            "keyRotated": true,
+            "revoked": true,
+            "warning": "Shared key rotated: the removed client is revoked, but ALL \
+                        remaining clients must re-download their config to keep working.",
+        })));
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "keyRotated": false,
+        "revoked": false,
+        "warning": "Client row deleted, but MasterDnsVPN shares one key across all \
+                    clients — the removed client keeps access until you rotate the \
+                    encryption key (delete with rotateKey=true, or use regenerate-key).",
+    })))
 }
 
 // ---------------------------------------------------------------------------

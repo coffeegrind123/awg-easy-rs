@@ -25,6 +25,11 @@ use serde_json::{json, Value};
 use super::{api_err, map_err, ok_success, require_auth, AppState};
 use crate::{db, wg};
 
+/// Maximum AmneziaWG clients a non-admin user may create. Bounds the
+/// per-account resource cost (IP allocation + config rewrite + nft rebuild) so
+/// a low-privilege account can't exhaust the address pool or churn the config.
+const MAX_CLIENTS_PER_USER: i64 = 50;
+
 // ---------------------------------------------------------------------------
 // Query params for list
 // ---------------------------------------------------------------------------
@@ -239,12 +244,8 @@ pub async fn create_client(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = require_auth(&jar, &state)?;
 
-    if body.name.is_empty() || body.name.len() > 256 {
-        return Err(api_err(
-            StatusCode::BAD_REQUEST,
-            "Name must be 1-256 characters",
-        ));
-    }
+    validate_client_name(&body.name)
+        .map_err(|m| api_err(StatusCode::BAD_REQUEST, &m))?;
     if let Some(ref expires) = body.expires_at {
         let ok = chrono::DateTime::parse_from_rfc3339(expires).is_ok()
             || chrono::NaiveDateTime::parse_from_str(expires, "%Y-%m-%dT%H:%M").is_ok()
@@ -257,6 +258,20 @@ pub async fn create_client(
         }
     }
 
+    // Per-user quota for non-admins: each client allocates an IP, rewrites the
+    // WireGuard config, and triggers an nftables rebuild, so an unbounded
+    // create loop from a low-privilege account is a resource/IP-exhaustion DoS.
+    // Admins (role >= 1) are exempt — they manage the whole roster.
+    if user.role == 0 {
+        let mine = db::count_clients_for_user(user.id).map_err(map_err)?;
+        if mine >= MAX_CLIENTS_PER_USER {
+            return Err(api_err(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Client limit reached ({MAX_CLIENTS_PER_USER} per user)"),
+            ));
+        }
+    }
+
     let iface = db::get_interface().map_err(map_err)?;
     let user_config = db::get_user_config().map_err(map_err)?;
 
@@ -264,32 +279,16 @@ pub async fn create_client(
     let (private_key, public_key) = wg::generate_keypair().map_err(map_err)?;
     let psk = wg::generate_psk().map_err(map_err)?;
 
-    // Allocate IPs
-    let existing_clients = db::get_all_clients().map_err(map_err)?;
-    let used_v4: Vec<String> = existing_clients
-        .iter()
-        .filter_map(|c| c.ipv4_address.clone())
-        .collect();
-    let used_v6: Vec<String> = existing_clients
-        .iter()
-        .filter_map(|c| c.ipv6_address.clone())
-        .collect();
-
-    let ipv4 = db::next_ipv4(&iface.ipv4_cidr, &used_v4).map_err(map_err)?;
-
-    let ipv6 = if !iface.ipv6_cidr.is_empty() {
-        Some(db::next_ipv6(&iface.ipv6_cidr, &used_v6).map_err(map_err)?)
-    } else {
-        None
-    };
-
-    // Build CreateClientParams with sensible defaults from user_config
-    let params = db::CreateClientParams {
+    // Build CreateClientParams with sensible defaults from user_config. The
+    // IPv4/IPv6 addresses are placeholders — `create_client_alloc_ip` picks the
+    // real ones atomically (under a single DB lock) to avoid the check-then-
+    // insert race two concurrent creates would otherwise hit.
+    let mut params = db::CreateClientParams {
         user_id: Some(user.id),
         interface_id: Some(iface.name.clone()),
         name: body.name,
-        ipv4_address: Some(ipv4),
-        ipv6_address: ipv6,
+        ipv4_address: None,
+        ipv6_address: None,
         private_key,
         public_key,
         pre_shared_key: Some(psk),
@@ -322,7 +321,9 @@ pub async fn create_client(
         enabled: true,
     };
 
-    let client_id = db::create_client(&params).map_err(map_err)?;
+    let client_id =
+        db::create_client_alloc_ip(&mut params, &iface.ipv4_cidr, &iface.ipv6_cidr)
+            .map_err(map_err)?;
 
     // Save config to apply changes
     wg::save_config_async().await.map_err(map_err)?;
@@ -475,14 +476,10 @@ pub async fn update_client(
         return Err(api_err(StatusCode::FORBIDDEN, "Access denied"));
     }
 
-    // Bound the name length to prevent unbounded storage growth.
+    // Bound the name length and reject control characters (see
+    // `validate_client_name`).
     if let Some(ref n) = body.name {
-        if n.is_empty() || n.len() > 256 {
-            return Err(api_err(
-                StatusCode::BAD_REQUEST,
-                "Name must be 1-256 characters",
-            ));
-        }
+        validate_client_name(n).map_err(|m| api_err(StatusCode::BAD_REQUEST, &m))?;
     }
 
     // Privilege escalation guard: only admins may change addressing,
@@ -563,7 +560,14 @@ pub async fn update_client(
     if let Some(ref v) = body.post_up { fields.insert("post_up".into(), v.clone()); }
     if let Some(ref v) = body.pre_down { fields.insert("pre_down".into(), v.clone()); }
     if let Some(ref v) = body.post_down { fields.insert("post_down".into(), v.clone()); }
-    if let Some(ref v) = body.server_endpoint { fields.insert("server_endpoint".into(), v.clone()); }
+    if let Some(ref v) = body.server_endpoint {
+        // Interpolated verbatim into the server `[Peer]` block's `Endpoint = …`
+        // line (wg::config_gen). Admin-only, but validate for consistency with
+        // the other routing fields: a newline would inject arbitrary config
+        // directives into the generated .conf.
+        validate_server_endpoint(v).map_err(|m| api_err(StatusCode::BAD_REQUEST, &m))?;
+        fields.insert("server_endpoint".into(), v.clone());
+    }
     if let Some(v) = body.j_c { fields.insert("j_c".into(), v.to_string()); }
     if let Some(v) = body.j_min { fields.insert("j_min".into(), v.to_string()); }
     if let Some(v) = body.j_max { fields.insert("j_max".into(), v.to_string()); }
@@ -832,7 +836,59 @@ pub async fn generate_one_time_link(
 /// nft statement separators, which would otherwise be string-interpolated into
 /// the per-client nftables transaction (`firewall::gen_rules`) and could inject
 /// extra rule tokens.
-fn validate_routing_entry(entry: &str) -> Result<(), String> {
+/// Validate a client display name: 1–256 chars, no control characters.
+/// The name is rendered into many sinks (WireGuard peer comment, Xray
+/// `email`, share-link labels, the Prometheus `name="…"` label). Each sink
+/// has its own escaping, but rejecting control characters (newlines, CR, NUL,
+/// tabs, ANSI escapes) at the boundary is cheap defense-in-depth against any
+/// sink whose escaping is imperfect — the Prometheus exposition path being the
+/// concrete example.
+fn validate_client_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().count() > 256 {
+        return Err("Name must be 1-256 characters".into());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("Name must not contain control characters".into());
+    }
+    Ok(())
+}
+
+/// Validate a per-client `serverEndpoint` override: `host:port` (or
+/// `[v6]:port`), no control characters, host non-empty, port 1–65535. Rejects
+/// the newline that would otherwise inject config lines into the generated
+/// server `[Peer]` block. An empty value clears the override and is allowed.
+fn validate_server_endpoint(ep: &str) -> Result<(), String> {
+    let ep = ep.trim();
+    if ep.is_empty() {
+        return Ok(());
+    }
+    if ep.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("serverEndpoint must not contain whitespace or control characters".into());
+    }
+    // Split host:port from the right so IPv6 (with its internal colons) works;
+    // bracketed IPv6 keeps its port after the closing ']'.
+    let (host, port) = if let Some(rest) = ep.strip_prefix('[') {
+        let (h, after) = rest
+            .split_once(']')
+            .ok_or_else(|| "serverEndpoint: unterminated '[' in IPv6 literal".to_string())?;
+        let port = after
+            .strip_prefix(':')
+            .ok_or_else(|| "serverEndpoint: expected ':port' after IPv6 literal".to_string())?;
+        (h.to_string(), port.to_string())
+    } else {
+        let (h, p) = ep
+            .rsplit_once(':')
+            .ok_or_else(|| "serverEndpoint must be host:port".to_string())?;
+        (h.to_string(), p.to_string())
+    };
+    if host.is_empty() {
+        return Err("serverEndpoint host is empty".into());
+    }
+    validate_port(&port).map_err(|m| format!("serverEndpoint: {m}"))?;
+    Ok(())
+}
+
+pub(crate) fn validate_routing_entry(entry: &str) -> Result<(), String> {
     let e = entry.trim();
     if e.is_empty() {
         return Err("empty entry".into());
@@ -849,7 +905,7 @@ fn validate_routing_entry(entry: &str) -> Result<(), String> {
 /// address part must be a real IP literal and the port numeric in 1..=65535.
 /// Mirrors `firewall::parse_target` so nothing reaches the nft transaction that
 /// the rule generator can't safely render.
-fn validate_firewall_target(entry: &str) -> Result<(), String> {
+pub(crate) fn validate_firewall_target(entry: &str) -> Result<(), String> {
     let e = entry.trim();
     if e.is_empty() {
         return Err("empty entry".into());
@@ -919,6 +975,32 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+
+    #[test]
+    fn client_name_rejects_control_chars() {
+        assert!(validate_client_name("Alice's laptop").is_ok());
+        assert!(validate_client_name("").is_err());
+        // Newline / CR / NUL / tab / ANSI-escape must all be rejected — they
+        // feed the WG peer comment, Xray email, and the Prometheus label.
+        for bad in ["a\nb", "a\rb", "a\tb", "a\0b", "a\x1b[31mb"] {
+            assert!(validate_client_name(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn server_endpoint_rejects_injection() {
+        assert!(validate_server_endpoint("vpn.example.com:51820").is_ok());
+        assert!(validate_server_endpoint("[2001:db8::1]:51820").is_ok());
+        assert!(validate_server_endpoint("").is_ok()); // clears the override
+        for bad in [
+            "host:51820\nPostUp = id",
+            "host:99999",
+            "host",
+            "ho st:53",
+        ] {
+            assert!(validate_server_endpoint(bad).is_err(), "should reject {bad:?}");
+        }
+    }
 
     #[test]
     fn routing_entry_accepts_ip_and_cidr() {

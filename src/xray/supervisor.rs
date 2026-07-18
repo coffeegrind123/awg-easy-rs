@@ -17,7 +17,7 @@
 //! short critical sections, and the watchdog runs on a separate clone of
 //! the same child handle via `child.id()` for liveness probing.
 
-use crate::proc::{pid_alive, restart_backoff, send_signal};
+use crate::proc::{pid_alive, restart_backoff, send_signal, HEALTHY_UPTIME};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +97,16 @@ async fn lock_state<'a>() -> tokio::sync::MutexGuard<'a, Option<State>> {
 /// "do the right thing" entry point — call this after every admin
 /// mutation that could affect Xray.
 pub async fn ensure_running() -> Result<()> {
+    // A manual/administrative reconcile is a clean slate: clear any prior
+    // crash-loop counter so the operator's action gets a full backoff budget.
+    ensure_running_inner(true).await
+}
+
+/// `reset_crash = false` is used by the watchdog's restart path so a
+/// spawn-then-quickly-exit child does NOT wipe its own `restart_attempts`
+/// counter — otherwise the exponential backoff never climbs and the
+/// "give up after N failures" cap is never reached (permanent ~1/s respawn).
+async fn ensure_running_inner(reset_crash: bool) -> Result<()> {
     let inbound = db::get_xray_inbound().context("get_xray_inbound")?;
     let clients = db::list_xray_clients().context("list_xray_clients")?;
 
@@ -136,7 +146,13 @@ pub async fn ensure_running() -> Result<()> {
         started_at: Instant::now(),
         shutdown_requested: shutdown_requested.clone(),
     });
-    state.crash = CrashState::default();
+    if reset_crash {
+        state.crash = CrashState::default();
+    } else {
+        // Watchdog-driven respawn: keep the accumulating attempt counter,
+        // just clear the stale error string now that we're up again.
+        state.crash.last_error = None;
+    }
     state.disabled_reason = None;
     drop(guard);
     spawn_watchdog(child, shutdown_requested);
@@ -231,6 +247,7 @@ async fn spawn(bin: &PathBuf, config: &PathBuf) -> Result<Child> {
         // future operator who drops them in vendor/ can light them up.
         .env("XRAY_LOCATION_ASSET", &CONFIG.xray_dir)
         .kill_on_drop(false);
+    crate::proc::harden_child(&mut cmd);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
@@ -366,6 +383,14 @@ fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
         let attempts = {
             let mut guard = lock_state().await;
             let state = guard.as_mut().expect("state initialised");
+            // A child that stayed up past the healthy threshold has proven it
+            // can run; treat its eventual death as a fresh incident so a
+            // long-lived process that dies once doesn't inherit an old counter.
+            // A child that dies faster than this keeps accumulating, so the
+            // backoff escalates and the give-up cap is actually reachable.
+            if started_at.elapsed() >= HEALTHY_UPTIME {
+                state.crash.restart_attempts = 0;
+            }
             state.crash.restart_attempts += 1;
             state.crash.last_error = Some(format!(
                 "exited after {:?}: {exit_str}",
@@ -383,8 +408,9 @@ fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
         sleep(backoff).await;
 
         // ensure_running re-reads DB and spawns. Single source of
-        // truth for "should we be running?".
-        if let Err(e) = ensure_running().await {
+        // truth for "should we be running?". `false` = don't reset the
+        // crash counter — this is a restart, not a manual reconcile.
+        if let Err(e) = ensure_running_inner(false).await {
             tracing::error!(error = ?e, "xray restart failed");
         }
     });

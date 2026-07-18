@@ -80,9 +80,6 @@ socket2 = "0.6"
 # per-SNI server certificate.
 quinn-proto = "0.11"
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
-# TOML parse for the proxy's own ProxyConfig (kept so the ported config
-# tests compile; runtime config is built from the DB, not a file).
-toml = "0.8"
 # Typed error enum for the proxy modules (src/proxy/errors.rs).
 thiserror = "1"
 
@@ -103,8 +100,11 @@ serial_test = { version = "3", features = ["async"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
-# URL encoding for TOTP URI
-url = "2"
+# TOML parse for the proxy's ProxyConfig round-trip tests only. At runtime the
+# proxy config is built from the SQLite DB, never a file (see src/proxy/config.rs
+# — load_config/parse_config are #[cfg(test)]), so `toml` and its ~8-crate tree
+# stay out of the release binary.
+toml = "0.8"
 
 # Ported proxy test modules (src/proxy/*.rs #[cfg(test)]): temp dirs for
 # config-file round-trips, and tokio's paused-clock test harness for the

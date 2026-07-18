@@ -45,9 +45,17 @@ impl std::ops::DerefMut for ConnGuard {
 }
 
 fn conn() -> ConnGuard {
-    ConnGuard {
-        inner: db_slot().lock().expect("Database lock poisoned"),
-    }
+    // Recover from a poisoned mutex instead of cascading the panic. Poisoning
+    // means some thread panicked *while holding the guard*; but every write in
+    // this module is a self-contained statement/transaction (rusqlite rolls an
+    // uncommitted transaction back on drop), so the Connection itself is not
+    // left in a torn state. Propagating the poison (the old `.expect`) instead
+    // turned a single stray panic into a permanent, whole-service DB outage —
+    // strictly worse for availability. `into_inner()` takes the guard anyway.
+    let inner = db_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ConnGuard { inner }
 }
 
 /// Generic field map used by update helpers.
@@ -1155,6 +1163,7 @@ CREATE TABLE IF NOT EXISTS users_table (
     role            INTEGER NOT NULL DEFAULT 0,
     totp_key        TEXT,
     totp_verified   INTEGER NOT NULL DEFAULT 0,
+    totp_last_step  INTEGER NOT NULL DEFAULT 0,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1495,6 +1504,15 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         tracing::info!(
             "DB migration: added clients_table.advanced_security (per-peer AdvancedSecurity flag)"
         );
+    }
+    // totp_last_step: highest TOTP timestep already consumed for this user.
+    // Enables single-use enforcement so a captured code can't be replayed
+    // within its ±1-window validity.
+    if !column_exists(conn, "users_table", "totp_last_step")? {
+        conn.execute_batch(
+            "ALTER TABLE users_table ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0",
+        )?;
+        tracing::info!("DB migration: added users_table.totp_last_step (TOTP replay guard)");
     }
     // additional_config: free-form append-to-config text. Mirrors amnezia-client's
     // additionalServerConfig / additionalClientConfig escape hatch — operators
@@ -1885,6 +1903,19 @@ fn snapshot_is_restorable(path: &str) -> bool {
 fn restore_from(dst: &mut Connection, src_path: &str) -> Result<()> {
     let src = Connection::open(src_path)
         .with_context(|| format!("open snapshot {src_path} for restore"))?;
+    // Verify the snapshot before adopting it. A truncated/corrupt/foreign file
+    // that still parses as a SQLite header would otherwise be copied straight
+    // into the live DB. `quick_check` is a cheap structural pass (skips the
+    // full per-row index cross-check of `integrity_check`) — enough to reject
+    // bit-rot or a swapped file at boot without a lengthy scan.
+    let verdict: String = src
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .context("integrity-check snapshot before restore")?;
+    if verdict != "ok" {
+        return Err(anyhow!(
+            "refusing to restore snapshot {src_path}: integrity check failed ({verdict})"
+        ));
+    }
     let backup = rusqlite::backup::Backup::new(&src, dst)
         .context("init restore backup handle")?;
     backup
@@ -1907,23 +1938,80 @@ fn restore_from(dst: &mut Connection, src_path: &str) -> Result<()> {
 /// surfaced as an `Err` for the caller to log-and-swallow — it must never
 /// propagate into a panic or block the server.
 pub fn snapshot_to(dst_path: &str) -> Result<()> {
-    let tmp = format!("{dst_path}.partial");
-    {
-        let guard = conn();
-        guard
-            .backup(rusqlite::DatabaseName::Main, &tmp, None)
-            .with_context(|| format!("online-backup database to {tmp}"))?;
-    }
-    // chmod 0600 before promoting — the snapshot holds the same secrets as
-    // the live DB. Best-effort.
+    use std::path::{Path, PathBuf};
+
+    // Back up into a freshly-created, PRIVATE (0700) sibling directory, then
+    // rename the finished file into place. This closes three holes the old
+    // `{dst}.partial` path had, all of which briefly exposed every secret in
+    // the DB (WireGuard/Xray private keys, TOTP secrets, session-signing key,
+    // hashed passwords):
+    //   1. `backup()` created the temp file with the default umask (0644) and
+    //      only chmod'd it 0600 *after* the whole file was on disk — a
+    //      world-readable window. Now the enclosing dir is 0700 from creation.
+    //   2. The temp name `{dst}.partial` was predictable, so on a shared
+    //      directory an attacker could pre-plant a symlink and redirect the
+    //      secret dump. The dir name now carries a CSPRNG suffix and is made
+    //      with `create_dir` (fails if the path already exists).
+    //   3. Transient SQLite journal/WAL siblings (`snapshot.db-journal`, …)
+    //      inherited default perms too; keeping them inside the 0700 dir
+    //      contains them, and the dir is removed on every exit path.
+    // The chmod result is now surfaced as an error: we never promote a
+    // snapshot we could not lock down.
+    let parent: PathBuf = Path::new(dst_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut rand_suffix = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut rand_suffix);
+    let base = Path::new(dst_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("db");
+    let tmp_dir = parent.join(format!(
+        ".{base}.snap.{}.{}",
+        std::process::id(),
+        hex::encode(rand_suffix)
+    ));
+
+    std::fs::create_dir(&tmp_dir)
+        .with_context(|| format!("create private snapshot dir {}", tmp_dir.display()))?;
+    // Remove the private dir (and any journal siblings) on every return path.
+    let _cleanup = TmpDirGuard(tmp_dir.clone());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("lock down snapshot dir {}", tmp_dir.display()))?;
     }
-    std::fs::rename(&tmp, dst_path)
-        .with_context(|| format!("promote snapshot {tmp} → {dst_path}"))?;
+
+    let tmp_db = tmp_dir.join("snapshot.db");
+    {
+        let guard = conn();
+        guard
+            .backup(rusqlite::DatabaseName::Main, &tmp_db, None)
+            .with_context(|| format!("online-backup database to {}", tmp_db.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_db, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 snapshot {}", tmp_db.display()))?;
+    }
+    std::fs::rename(&tmp_db, dst_path)
+        .with_context(|| format!("promote snapshot {} → {dst_path}", tmp_db.display()))?;
     Ok(())
+}
+
+/// Removes a directory tree on drop — used to guarantee the private snapshot
+/// scratch dir never lingers, even when `snapshot_to` returns early on error.
+struct TmpDirGuard(std::path::PathBuf);
+
+impl Drop for TmpDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Reset the global DB handle to a fresh in-memory database for tests.
@@ -2128,9 +2216,10 @@ pub fn get_client(id: i64) -> Result<Client> {
     .context(format!("Client {id} not found"))
 }
 
-pub fn create_client(data: &CreateClientParams) -> Result<i64> {
-    let mut c = conn();
-    let tx = c.transaction()?;
+/// Insert a client row within an existing transaction. Shared by
+/// [`create_client`] and [`create_client_alloc_ip`] so the column list lives
+/// in exactly one place.
+fn insert_client(tx: &rusqlite::Transaction, data: &CreateClientParams) -> Result<i64> {
     tx.execute(
         "INSERT INTO clients_table \
          (user_id, interface_id, name, ipv4_address, ipv6_address, private_key, public_key, \
@@ -2173,7 +2262,68 @@ pub fn create_client(data: &CreateClientParams) -> Result<i64> {
             bool_to_int(data.enabled),
         ],
     )?;
-    let id = tx.last_insert_rowid();
+    Ok(tx.last_insert_rowid())
+}
+
+/// Count the clients owned by a given user — used to enforce the per-user
+/// create quota.
+pub fn count_clients_for_user(user_id: i64) -> Result<i64> {
+    conn()
+        .query_row(
+            "SELECT COUNT(*) FROM clients_table WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+}
+
+/// Atomically allocate the next free IPv4 (and IPv6, when `ipv6_cidr` is
+/// non-empty) and insert the client — all under a single held DB lock. This
+/// closes the check-then-insert race where two concurrent creates read the
+/// same "used IPs" snapshot and pick the same address (the loser then hit the
+/// UNIQUE constraint with a spurious 500). `data`'s `ipv4_address` /
+/// `ipv6_address` are overwritten with the freshly-allocated values.
+pub fn create_client_alloc_ip(
+    data: &mut CreateClientParams,
+    ipv4_cidr: &str,
+    ipv6_cidr: &str,
+) -> Result<i64> {
+    let mut c = conn();
+    let tx = c.transaction()?;
+    let (mut used_v4, mut used_v6): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    {
+        let mut stmt = tx.prepare("SELECT ipv4_address, ipv6_address FROM clients_table")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        for row in rows {
+            let (v4, v6) = row?;
+            if let Some(v) = v4 {
+                used_v4.push(v);
+            }
+            if let Some(v) = v6 {
+                used_v6.push(v);
+            }
+        }
+    }
+    data.ipv4_address = Some(next_ipv4(ipv4_cidr, &used_v4)?);
+    data.ipv6_address = if ipv6_cidr.is_empty() {
+        None
+    } else {
+        Some(next_ipv6(ipv6_cidr, &used_v6)?)
+    };
+    let id = insert_client(&tx, data)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+pub fn create_client(data: &CreateClientParams) -> Result<i64> {
+    let mut c = conn();
+    let tx = c.transaction()?;
+    let id = insert_client(&tx, data)?;
     tx.commit()?;
     Ok(id)
 }
@@ -2290,8 +2440,30 @@ pub fn create_user(data: &CreateUserParams) -> Result<i64> {
 
 const VALID_USER_COLUMNS: &[&str] = &[
     "username", "password", "email", "name", "role",
-    "totp_key", "totp_verified", "enabled",
+    "totp_key", "totp_verified", "totp_last_step", "enabled",
 ];
+
+/// Highest TOTP timestep already consumed for this user (0 if never).
+pub fn get_totp_last_step(user_id: i64) -> Result<i64> {
+    conn()
+        .query_row(
+            "SELECT totp_last_step FROM users_table WHERE id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+}
+
+/// Record the TOTP timestep just consumed. Monotonic: only advances, so a
+/// concurrent request that matched an earlier step can't lower the watermark.
+pub fn set_totp_last_step(user_id: i64, step: i64) -> Result<()> {
+    conn().execute(
+        "UPDATE users_table SET totp_last_step = ?2 \
+         WHERE id = ?1 AND totp_last_step < ?2",
+        params![user_id, step],
+    )?;
+    Ok(())
+}
 
 pub fn update_user(id: i64, fields: &UpdateMap) -> Result<()> {
     exec_update(

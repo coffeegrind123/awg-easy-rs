@@ -31,7 +31,7 @@ fn provisions_admin_and_completes_setup() {
 
     let dns = vec!["1.1.1.1".to_string()];
     let allowed = vec!["0.0.0.0/0".to_string()];
-    let p = params("root", "supersecret", &dns, &allowed);
+    let p = params("root", "supersecret-pw", &dns, &allowed);
 
     assert!(init_setup::provision_initial_setup(&p).unwrap(), "provisioned");
     assert_eq!(db::get_user_count().unwrap(), 1);

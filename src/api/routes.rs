@@ -17,6 +17,25 @@ use serde_json::{json, Value};
 use super::{api_err, map_err};
 use crate::{auth, db, wg};
 
+/// Escape a string for use inside a Prometheus label value (`name="…"`).
+/// Per the exposition format the backslash, double-quote, and newline are the
+/// only characters requiring escaping — and getting this wrong is a metric
+/// **injection**: the client `name` is attacker-set (any authenticated user
+/// can create a client), so an un-escaped `\n` or `"` would let a crafted name
+/// forge additional metric lines on the (optionally public) `/metrics` output.
+fn escape_prometheus_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Constant-time string equality for short tokens.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -228,9 +247,10 @@ pub async fn metrics_prometheus(
     output.push_str("# HELP wireguard_peer_online Whether the peer is online (1 = yes)\n");
     output.push_str("# TYPE wireguard_peer_online gauge\n");
 
+    let safe_iface = escape_prometheus_label(&iface.name);
     for client in &clients {
         let peer = peers.iter().find(|p| p.public_key == client.public_key);
-        let safe_name = client.name.replace('"', "\\\"");
+        let safe_name = escape_prometheus_label(&client.name);
 
         let rx = peer.map(|p| p.transfer_rx).unwrap_or(0);
         let tx = peer.map(|p| p.transfer_tx).unwrap_or(0);
@@ -242,19 +262,19 @@ pub async fn metrics_prometheus(
 
         output.push_str(&format!(
             "wireguard_peer_rx_bytes{{interface=\"{}\",name=\"{}\",id=\"{}\"}} {}\n",
-            iface.name, safe_name, client.id, rx
+            safe_iface, safe_name, client.id, rx
         ));
         output.push_str(&format!(
             "wireguard_peer_tx_bytes{{interface=\"{}\",name=\"{}\",id=\"{}\"}} {}\n",
-            iface.name, safe_name, client.id, tx
+            safe_iface, safe_name, client.id, tx
         ));
         output.push_str(&format!(
             "wireguard_peer_latest_handshake{{interface=\"{}\",name=\"{}\",id=\"{}\"}} {}\n",
-            iface.name, safe_name, client.id, hs
+            safe_iface, safe_name, client.id, hs
         ));
         output.push_str(&format!(
             "wireguard_peer_online{{interface=\"{}\",name=\"{}\",id=\"{}\"}} {}\n",
-            iface.name, safe_name, client.id, online
+            safe_iface, safe_name, client.id, online
         ));
     }
 
@@ -295,5 +315,31 @@ fn sanitize_filename(name: &str) -> String {
         "client".to_string()
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prometheus_label_escapes_injection_chars() {
+        // A client named to break out of the label and forge a metric line.
+        let hostile = "x\"} 1\nwireguard_peer_online{name=\"y";
+        let escaped = escape_prometheus_label(hostile);
+        // No RAW (unescaped) newline survives — the value stays one line.
+        assert!(!escaped.contains('\n'), "raw newline must be escaped");
+        // Every double-quote in the output is backslash-escaped: splitting on
+        // the escaped form and rejoining must leave no stray quote.
+        assert!(
+            !escaped.replace("\\\"", "").contains('"'),
+            "every quote must be escaped: {escaped}"
+        );
+        // Exact expected escaping (quote→\", newline→\n literal).
+        assert_eq!(escaped, "x\\\"} 1\\nwireguard_peer_online{name=\\\"y");
+        // Backslash is doubled.
+        assert_eq!(escape_prometheus_label("a\\b"), "a\\\\b");
+        // Ordinary names pass through unchanged.
+        assert_eq!(escape_prometheus_label("Alice"), "Alice");
     }
 }

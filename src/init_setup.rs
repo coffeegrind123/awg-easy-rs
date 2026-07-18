@@ -29,8 +29,8 @@ pub fn provision_initial_setup(p: &InitSetupParams) -> Result<bool> {
     if db::get_user_count().unwrap_or(0) > 0 {
         return Ok(false);
     }
-    if p.password.len() < 6 {
-        bail!("INIT_PASSWORD must be at least 6 characters");
+    if p.password.chars().count() < 12 {
+        bail!("INIT_PASSWORD must be at least 12 characters");
     }
 
     let hash = auth::hash_password(p.password)?;
@@ -60,6 +60,14 @@ pub fn provision_initial_setup(p: &InitSetupParams) -> Result<bool> {
     }
 
     if let Some(dns) = p.dns {
+        // Each entry lands in the generated WireGuard `DNS = …` line — reject
+        // anything that isn't a bare IP so a hostile INIT_DNS can't inject
+        // config directives.
+        for e in dns {
+            if e.trim().parse::<std::net::IpAddr>().is_err() {
+                bail!("INIT_DNS entry {e:?} is not a valid IP address");
+            }
+        }
         let mut fields = db::UpdateMap::new();
         fields.insert(
             "default_dns".into(),
@@ -68,6 +76,12 @@ pub fn provision_initial_setup(p: &InitSetupParams) -> Result<bool> {
         db::update_user_config(&fields)?;
     }
     if let Some(allowed) = p.allowed_ips {
+        // Each entry flows into the per-client nftables transaction — reject
+        // anything that isn't an IP/CIDR literal.
+        for e in allowed {
+            crate::api::clients::validate_routing_entry(e)
+                .map_err(|m| anyhow::anyhow!("INIT_ALLOWED_IPS entry: {m}"))?;
+        }
         let mut fields = db::UpdateMap::new();
         fields.insert(
             "default_allowed_ips".into(),

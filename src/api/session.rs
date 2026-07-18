@@ -72,8 +72,16 @@ pub fn reset_login_attempts() {
 fn resolve_client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
     if crate::config::CONFIG.trust_proxy {
         if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-            if let Some(first) = v.split(',').next() {
-                let s = first.trim();
+            // Take the RIGHTMOST entry, not the leftmost. The standard reverse-
+            // proxy idiom (nginx `$proxy_add_x_forwarded_for`, Apache
+            // mod_proxy) *appends* the real peer to whatever the client sent,
+            // so the header reads `<client-forged…>, <real-peer>`. The leftmost
+            // token is therefore fully attacker-controlled — trusting it let a
+            // client mint a fresh rate-limit bucket per request and evade the
+            // per-IP limiter. The rightmost entry is the address our own
+            // trusted proxy vouched for.
+            if let Some(last) = v.split(',').next_back() {
+                let s = last.trim();
                 if !s.is_empty() {
                     return Some(s.to_string());
                 }
@@ -229,8 +237,23 @@ pub async fn create_session(
                     // password+TOTP brute-force is bounded independently of
                     // the password rate limiter.
                     check_totp_rate_limit(user.id)?;
-                    if !verify_totp_code(totp_key, code)? {
-                        return Err(api_err(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
+                    match verify_totp_code_step(totp_key, code)? {
+                        Some(step) => {
+                            // Single-use: reject any code whose timestep was
+                            // already consumed, so a captured/observed code
+                            // can't be replayed within its validity window.
+                            let last = db::get_totp_last_step(user.id).map_err(map_err)?;
+                            if (step as i64) <= last {
+                                return Err(api_err(
+                                    StatusCode::UNAUTHORIZED,
+                                    "TOTP code already used — wait for the next one",
+                                ));
+                            }
+                            db::set_totp_last_step(user.id, step as i64).map_err(map_err)?;
+                        }
+                        None => {
+                            return Err(api_err(StatusCode::UNAUTHORIZED, "Invalid TOTP code"));
+                        }
                     }
                 }
                 None => {
@@ -424,10 +447,10 @@ pub async fn change_password(
         }
     }
 
-    if body.new_password.len() < 6 {
+    if body.new_password.chars().count() < 12 {
         return Err(api_err(
             StatusCode::BAD_REQUEST,
-            "Password must be at least 6 characters",
+            "Password must be at least 12 characters",
         ));
     }
 
@@ -458,7 +481,14 @@ pub async fn change_password(
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TotpRequest {
-    Setup,
+    Setup {
+        // Required only when a verified TOTP secret already exists — rotating
+        // an active second factor must re-prove the password so a hijacked
+        // session can't silently replace the victim's 2FA. Optional/ignored on
+        // first-time enrolment (no verified secret yet).
+        #[serde(rename = "currentPassword", default)]
+        current_password: Option<String>,
+    },
     Create {
         code: String,
     },
@@ -476,7 +506,26 @@ pub async fn toggle_totp(
     let user = require_auth(&jar, &state)?;
 
     match body {
-        TotpRequest::Setup => {
+        TotpRequest::Setup { current_password } => {
+            // If a verified 2FA secret is already active, require the current
+            // password before overwriting it — otherwise anyone holding a live
+            // session cookie could rotate the victim's second factor to one
+            // they control (a 2FA takeover / lockout). First-time enrolment
+            // (no verified secret) needs no password.
+            if user.totp_verified {
+                let ok = current_password
+                    .as_deref()
+                    .map(|pw| auth::verify_password(pw, &user.password))
+                    .transpose()
+                    .map_err(map_err)?
+                    .unwrap_or(false);
+                if !ok {
+                    return Err(api_err(
+                        StatusCode::UNAUTHORIZED,
+                        "Current password is required to change an active TOTP secret",
+                    ));
+                }
+            }
             use rand::RngCore;
             // Generate a fresh 20-byte secret per RFC 6238 recommendations.
             let mut secret = [0u8; 20];
@@ -521,12 +570,16 @@ pub async fn toggle_totp(
                     "Stored TOTP key is not valid base32",
                 )
             })?;
-            if !verify_totp_secret(&secret, &code)? {
-                return Err(api_err(StatusCode::BAD_REQUEST, "Invalid TOTP code"));
-            }
+            let step = match verify_totp_secret_step(&secret, &code)? {
+                Some(s) => s,
+                None => return Err(api_err(StatusCode::BAD_REQUEST, "Invalid TOTP code")),
+            };
             let mut fields = db::UpdateMap::new();
             fields.insert("totp_verified".into(), "1".into());
             db::update_user(user.id, &fields).map_err(map_err)?;
+            // Consume the enrolment code's timestep so it can't be immediately
+            // replayed at the login prompt.
+            db::set_totp_last_step(user.id, step as i64).map_err(map_err)?;
             Ok(Json(json!({
                 "success": true,
                 "type": "created",
@@ -666,22 +719,34 @@ fn url_encode(s: &str) -> String {
 /// 30-second window. Constant-time on the result; the totp-rs library does
 /// not expose a const-time comparison so we collapse failures into a single
 /// boolean.
-fn verify_totp_code(key_b32: &str, code: &str) -> Result<bool, (StatusCode, Json<Value>)> {
+/// Verify a TOTP code and return the matched 30-second timestep on success
+/// (so the caller can enforce single-use / replay protection).
+fn verify_totp_code_step(
+    key_b32: &str,
+    code: &str,
+) -> Result<Option<u64>, (StatusCode, Json<Value>)> {
     let secret = base32_decode(key_b32).ok_or_else(|| {
         api_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Stored TOTP key is not valid base32",
         )
     })?;
-    verify_totp_secret(&secret, code)
+    verify_totp_secret_step(&secret, code)
 }
 
-/// Verify a TOTP code against a raw secret byte slice.
-fn verify_totp_secret(secret: &[u8], code: &str) -> Result<bool, (StatusCode, Json<Value>)> {
+/// Verify a TOTP code and return the matched timestep (`time / 30`) so the
+/// caller can reject reuse. Replicates the library's skew-1 window (previous,
+/// current, next step) explicitly — `check_current` only yields a bool, which
+/// isn't enough to identify *which* code was consumed. The per-candidate
+/// compare is constant-time so the matched step doesn't leak via timing.
+fn verify_totp_secret_step(
+    secret: &[u8],
+    code: &str,
+) -> Result<Option<u64>, (StatusCode, Json<Value>)> {
     use totp_rs::{Algorithm, TOTP};
 
     if !code.chars().all(|c| c.is_ascii_digit()) || code.len() != 6 {
-        return Ok(false);
+        return Ok(None);
     }
 
     let totp = TOTP::new(
@@ -698,12 +763,31 @@ fn verify_totp_secret(secret: &[u8], code: &str) -> Result<bool, (StatusCode, Js
         api_err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
     })?;
 
-    let valid = totp.check_current(code).map_err(|e| {
-        tracing::error!("TOTP verification error: {e}");
-        api_err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
-    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let current = now / 30;
+    for step in [current.saturating_sub(1), current, current + 1] {
+        let expected = totp.generate(step * 30);
+        if ct_eq(expected.as_bytes(), code.as_bytes()) {
+            return Ok(Some(step));
+        }
+    }
+    Ok(None)
+}
 
-    Ok(valid)
+/// Constant-time byte-slice equality (length-independent short-circuit only on
+/// length, which is fixed at 6 here anyway).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[cfg(test)]

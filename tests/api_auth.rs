@@ -375,8 +375,8 @@ async fn setup_step2_creates_admin() {
     let app = router();
     let body = json!({
         "username": "newadmin",
-        "password": "securepass",
-        "confirmPassword": "securepass"
+        "password": "securepass-12",
+        "confirmPassword": "securepass-12"
     });
     let req = Request::builder()
         .method("POST")
@@ -391,7 +391,7 @@ async fn setup_step2_creates_admin() {
     let user = db::get_user_by_username("newadmin").unwrap();
     assert_eq!(user.name, "Admin");
     assert_eq!(user.role, 1);
-    assert!(auth::verify_password("securepass", &user.password).unwrap());
+    assert!(auth::verify_password("securepass-12", &user.password).unwrap());
 
     // Setup should advance to step 3
     assert_eq!(db::get_setup_step().unwrap(), 3);
@@ -437,7 +437,7 @@ async fn setup_step2_short_password() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(body["error"].as_str().unwrap().contains("at least 6"));
+    assert!(body["error"].as_str().unwrap().contains("at least 12"));
 }
 
 #[tokio::test]
@@ -447,8 +447,8 @@ async fn setup_step2_short_username() {
     let app = router();
     let body = json!({
         "username": "ab",
-        "password": "password123",
-        "confirmPassword": "password123"
+        "password": "password1234",
+        "confirmPassword": "password1234"
     });
     let req = Request::builder()
         .method("POST")
@@ -468,8 +468,8 @@ async fn setup_step2_long_username() {
     let long_name = "a".repeat(65);
     let body = json!({
         "username": long_name,
-        "password": "password123",
-        "confirmPassword": "password123"
+        "password": "password1234",
+        "confirmPassword": "password1234"
     });
     let req = Request::builder()
         .method("POST")
@@ -519,7 +519,7 @@ async fn change_password_success() {
 
     let body = json!({
         "currentPassword": "admin123",
-        "newPassword": "newpass456"
+        "newPassword": "newpassword456"
     });
     let req = Request::builder()
         .method("POST")
@@ -532,7 +532,7 @@ async fn change_password_success() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify new password works, old doesn't
-    let (s1, _, _) = login(&app, "admin", "newpass456", None).await;
+    let (s1, _, _) = login(&app, "admin", "newpassword456", None).await;
     assert_eq!(s1, StatusCode::OK);
     let (s2, _, _) = login(&app, "admin", "admin123", None).await;
     assert_eq!(s2, StatusCode::UNAUTHORIZED);
@@ -555,7 +555,7 @@ async fn change_password_wrong_current() {
 
     let body = json!({
         "currentPassword": "wrongcurrent",
-        "newPassword": "newpass456"
+        "newPassword": "newpassword456"
     });
     let req = Request::builder()
         .method("POST")

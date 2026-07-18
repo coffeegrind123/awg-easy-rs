@@ -318,9 +318,14 @@ fn dns_dnat_rules(iface: &str, family: Family, target: &str) -> Vec<String> {
     // is restricted to v4 packets, `dnat ip6 to` to v6 packets. The
     // `meta nfproto` guard makes that explicit and keeps the rule from
     // matching the wrong family.
+    // nftables requires an IPv6 DNAT target carrying a port to be bracketed —
+    // `dnat ip6 to [fd00::53]:53`. Without the brackets, `fd00::53:53` is
+    // itself a valid IPv6 literal, so nft would either DNAT to the wrong
+    // address with no port translation or reject the whole transaction
+    // (silently disabling v6 DNS lockdown). v4 is written bare.
     let (nfproto, dnat_kw, dst) = match family {
         Family::V4 => ("ipv4", "dnat ip to", target.to_string()),
-        Family::V6 => ("ipv6", "dnat ip6 to", target.to_string()),
+        Family::V6 => ("ipv6", "dnat ip6 to", format!("[{target}]")),
     };
     // Send everything to :53 on the target — DoT (:853) is also
     // rewritten to plain :53 so the lockdown resolver doesn't need a
@@ -362,29 +367,45 @@ fn dns_filter_rules(family: Family, target: &str) -> Vec<String> {
     ]
 }
 
+/// Cross-family leak guard, applied when `dns_lockdown` is on but
+/// `dns_block_external` is off. The DNAT rules only redirect the target's own
+/// address family (`meta nfproto` guard), so peer DNS in the *other* family
+/// would pass straight through the tunnel. Drop exactly that family's
+/// :53/:853 — the DNATed family still flows (its packets are rewritten in
+/// prerouting and fall through this chain), and non-DNS traffic is untouched.
+fn dns_leak_guard_rules(target_family: Family) -> Vec<String> {
+    let other = match target_family {
+        Family::V4 => "ipv6",
+        Family::V6 => "ipv4",
+    };
+    vec![
+        format!(
+            "add rule inet {TABLE} {DNS_FILTER_CHAIN} meta nfproto {other} udp dport {{ 53, 853 }} drop"
+        ),
+        format!(
+            "add rule inet {TABLE} {DNS_FILTER_CHAIN} meta nfproto {other} tcp dport {{ 53, 853 }} drop"
+        ),
+    ]
+}
+
 /// Idempotently create the dns-prerouting nat chain. We only call this
 /// when DNS lockdown is enabled — the chain is removed when it goes
 /// off. Creating an empty nat-prerouting chain costs nothing at packet
 /// time, but leaving stale ones around clutters `nft list ruleset`.
-fn ensure_dns_chains(iface: &str, block_external: bool) -> Result<()> {
+fn ensure_dns_chains(iface: &str) -> Result<()> {
     let iface = sanitize_iface(iface);
-    let mut txn = format!(
+    // The filter chain is now always created and jumped to whenever lockdown
+    // is on: even with `dns_block_external = false` we populate it with the
+    // cross-family leak guard (see `dns_leak_guard_rules`), so the previous
+    // "only create it when block_external" branch would have left v6 (or v4)
+    // DNS leaking. Creating the empty chain costs nothing at packet time.
+    let txn = format!(
         "add table inet {TABLE}\n\
          add chain inet {TABLE} forward {{ type filter hook forward priority filter; policy accept; }}\n\
-         add chain inet {TABLE} {DNS_NAT_CHAIN} {{ type nat hook prerouting priority dstnat; policy accept; }}\n",
+         add chain inet {TABLE} {DNS_NAT_CHAIN} {{ type nat hook prerouting priority dstnat; policy accept; }}\n\
+         add chain inet {TABLE} {DNS_FILTER_CHAIN}\n",
     );
-    if block_external {
-        txn.push_str(&format!("add chain inet {TABLE} {DNS_FILTER_CHAIN}\n"));
-    }
     nft_apply(&txn)?;
-
-    if !block_external {
-        // Make sure no stale jump points at a chain we won't populate;
-        // delete_dns_filter_jump is best-effort so this is safe even
-        // when the jump never existed.
-        delete_dns_filter_jump(&iface);
-        return Ok(());
-    }
 
     // Add the forward jump for dns-lockdown if it isn't already there.
     // Same idempotency dance as init_chain — `add rule` would otherwise
@@ -497,25 +518,33 @@ pub fn rebuild_dns_lockdown(iface: &crate::db::Interface) -> Result<()> {
         ));
     }
 
-    ensure_dns_chains(&iface.name, iface.dns_block_external)?;
+    ensure_dns_chains(&iface.name)?;
 
     let iface_name = sanitize_iface(&iface.name);
     let mut txn = String::new();
     // Flush both chains before re-adding so a previous (different)
     // target doesn't leave orphan rules behind.
     txn.push_str(&format!("flush chain inet {TABLE} {DNS_NAT_CHAIN}\n"));
-    if iface.dns_block_external {
-        txn.push_str(&format!("flush chain inet {TABLE} {DNS_FILTER_CHAIN}\n"));
-    }
+    txn.push_str(&format!("flush chain inet {TABLE} {DNS_FILTER_CHAIN}\n"));
     for r in dns_dnat_rules(&iface_name, family, &target) {
         txn.push_str(&r);
         txn.push('\n');
     }
-    if iface.dns_block_external {
-        for r in dns_filter_rules(family, &target) {
-            txn.push_str(&r);
-            txn.push('\n');
-        }
+    // The filter chain is always populated when lockdown is on:
+    //  * block_external  → drop ALL residual peer :53/:853 (both families)
+    //    except traffic already DNATed to the target.
+    //  * otherwise       → drop only the address family we CANNOT DNAT (the
+    //    DNAT rules carry a `meta nfproto` guard, so with a v4 target only v4
+    //    is redirected; without this guard peer v6 DNS would leak straight
+    //    out — the exact leak the module doc promised to prevent).
+    let filter_rules = if iface.dns_block_external {
+        dns_filter_rules(family, &target)
+    } else {
+        dns_leak_guard_rules(family)
+    };
+    for r in filter_rules {
+        txn.push_str(&r);
+        txn.push('\n');
     }
     nft_apply(&txn)?;
     tracing::info!(
@@ -547,7 +576,19 @@ fn append_client_rules(
     let comment = sanitize_comment(&client.name, client.id);
 
     for t in &targets {
-        let (ip, port, proto) = parse_target(t)?;
+        // A single malformed/hostile target must not abort the whole ruleset
+        // rebuild (which would leave every client's rules stale) nor reach the
+        // nft transaction. Skip it — with default-deny in force, a dropped
+        // target simply means that destination is not opened. Reachable only
+        // for legacy rows written before the write-side validators existed;
+        // fresh writes are already rejected at the API boundary.
+        let (ip, port, proto) = match parse_target(t) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(target = %t, error = %e, "skipping invalid firewall target");
+                continue;
+            }
+        };
         let is_v6 = ip.contains(':');
         if is_v6 && !enable_ipv6 {
             continue;
@@ -585,6 +626,25 @@ fn sanitize_iface(iface: &str) -> String {
         .collect()
 }
 
+/// Reject any address token that isn't a bare IP or CIDR literal. The
+/// returned string is spliced verbatim into an `nft -f -` transaction, so a
+/// value carrying whitespace, a newline, or an nft keyword must never
+/// survive — otherwise a caller that stored an unvalidated target (e.g. the
+/// admin-set `default_allowed_ips`, see the write-side guard in `api::admin`)
+/// could inject arbitrary nft statements. This is the durable, in-module
+/// guard: `firewall.rs` does not trust its callers for bytes it renders into
+/// the ruleset — mirroring the canonicalisation `parse_target_ip` already
+/// does for the DNS-lockdown target.
+fn checked_ip(ip: &str) -> Result<&str> {
+    if ip.parse::<std::net::IpAddr>().is_ok() || ip.parse::<ipnet::IpNet>().is_ok() {
+        Ok(ip)
+    } else {
+        Err(anyhow!(
+            "firewall target address {ip:?} is not a valid IP or CIDR literal"
+        ))
+    }
+}
+
 fn parse_target(entry: &str) -> Result<(&str, Option<u16>, Option<&str>)> {
     let (body, proto) = if let Some(rest) = entry.strip_suffix("/tcp") {
         (rest, Some("tcp"))
@@ -599,9 +659,9 @@ fn parse_target(entry: &str) -> Result<(&str, Option<u16>, Option<&str>)> {
             let ip = &body[1..end];
             let rest = &body[end + 1..];
             if let Some(port_str) = rest.strip_prefix(':') {
-                return Ok((ip, Some(port_str.parse()?), proto));
+                return Ok((checked_ip(ip)?, Some(port_str.parse()?), proto));
             }
-            return Ok((ip, None, proto));
+            return Ok((checked_ip(ip)?, None, proto));
         }
     }
 
@@ -609,12 +669,12 @@ fn parse_target(entry: &str) -> Result<(&str, Option<u16>, Option<&str>)> {
         if let Some(col) = body.rfind(':') {
             let maybe_port = &body[col + 1..];
             if maybe_port.chars().all(|c| c.is_ascii_digit()) {
-                return Ok((&body[..col], Some(maybe_port.parse()?), proto));
+                return Ok((checked_ip(&body[..col])?, Some(maybe_port.parse()?), proto));
             }
         }
     }
 
-    Ok((body, None, proto))
+    Ok((checked_ip(body)?, None, proto))
 }
 
 /// Build the nft `add rule …` lines for one (src, dst, [port], [proto]) triple.
@@ -998,12 +1058,35 @@ mod tests {
     }
 
     #[test]
-    fn dns_dnat_rules_v6_target_emits_v6_dnat_only() {
+    fn dns_dnat_rules_v6_target_is_bracketed() {
         let rules = dns_dnat_rules("awg0", Family::V6, "fd00::53");
         for r in &rules {
             assert!(r.contains("meta nfproto ipv6"));
-            assert!(r.contains("dnat ip6 to fd00::53:53"));
+            // The v6 target MUST be bracketed so the `:53` port is
+            // unambiguous — `fd00::53:53` (unbracketed) is a different,
+            // valid IPv6 literal and would silently mis-DNAT.
+            assert!(
+                r.contains("dnat ip6 to [fd00::53]:53"),
+                "v6 DNAT target must be bracketed, got: {r}"
+            );
             assert!(!r.contains("dnat ip to"));
+        }
+    }
+
+    #[test]
+    fn dns_leak_guard_drops_other_family_only() {
+        // v4 target → the un-DNAT-able family is v6, so the leak guard drops
+        // ipv6 :53/:853 and leaves ipv4 (DNATed) alone.
+        let v4 = dns_leak_guard_rules(Family::V4);
+        assert_eq!(v4.len(), 2);
+        for r in &v4 {
+            assert!(r.contains("meta nfproto ipv6"));
+            assert!(r.contains("dport { 53, 853 } drop"));
+        }
+        // v6 target → drops ipv4.
+        let v6 = dns_leak_guard_rules(Family::V6);
+        for r in &v6 {
+            assert!(r.contains("meta nfproto ipv4"));
         }
     }
 
@@ -1022,6 +1105,37 @@ mod tests {
     fn dns_filter_rules_v6_uses_ip6_daddr() {
         let rules = dns_filter_rules(Family::V6, "fd00::53");
         assert!(rules[0].contains("ip6 daddr fd00::53 accept"));
+    }
+
+    #[test]
+    fn parse_target_accepts_valid_shapes() {
+        for ok in [
+            "8.8.8.8",
+            "8.8.8.8:53",
+            "8.8.8.8:443/tcp",
+            "10.0.0.0/24",
+            "[2001:db8::1]:443",
+            "2001:db8::1",
+        ] {
+            assert!(parse_target(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn parse_target_rejects_nft_injection() {
+        // The address token is spliced verbatim into `nft -f -`; anything that
+        // isn't a bare IP/CIDR (whitespace, newline, nft keywords) must be
+        // rejected so a stored-but-unvalidated target can't inject statements.
+        for bad in [
+            "1.1.1.1\nadd rule inet awg-easy-rs wg-clients accept",
+            "1.1.1.1 accept",
+            "0.0.0.0/0 drop",
+            "not-an-ip",
+            "1.1.1.1; flush ruleset",
+            "$(whoami)",
+        ] {
+            assert!(parse_target(bad).is_err(), "should reject {bad:?}");
+        }
     }
 
     #[test]
@@ -1098,6 +1212,16 @@ mod tests {
             txn.push('\n');
         }
         for r in dns_filter_rules(Family::V4, "10.2.0.100") {
+            let r = r.replace("inet awg-easy-rs ", "inet awg-easy-rs-syntaxtest ");
+            txn.push_str(&r);
+            txn.push('\n');
+        }
+        // Cross-family leak guard (block_external=false path) — validate the
+        // `meta nfproto … drop` syntax for both target families.
+        for r in dns_leak_guard_rules(Family::V4)
+            .into_iter()
+            .chain(dns_leak_guard_rules(Family::V6))
+        {
             let r = r.replace("inet awg-easy-rs ", "inet awg-easy-rs-syntaxtest ");
             txn.push_str(&r);
             txn.push('\n');

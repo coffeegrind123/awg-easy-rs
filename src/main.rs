@@ -54,6 +54,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("INIT_ENABLED auto-setup failed (non-fatal): {e}");
     }
 
+    // Scrub the admin bootstrap password from our own environment now that
+    // `CONFIG` has captured it and `run_init_setup` has consumed it. Otherwise
+    // it lingers in `/proc/self/environ` and is inherited by every subprocess
+    // we later spawn (Xray, tor, dnscrypt-proxy, telemt, MasterDnsVPN, and even
+    // `awg`/`nft`), each of which would expose the operator's credential via
+    // `/proc/<child>/environ`. Done here — before any child is spawned and
+    // while the process is still effectively single-threaded for env purposes.
+    std::env::remove_var("INIT_PASSWORD");
+
     if let Err(e) = wg::startup() {
         tracing::warn!("AmneziaWG startup failed (non-fatal): {e}");
         tracing::warn!("Web UI will still be available. Fix AmneziaWG and use Restart from admin panel.");

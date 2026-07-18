@@ -21,7 +21,7 @@
 
 #![cfg(dns_bundled)]
 
-use crate::proc::{pid_alive, restart_backoff, send_signal};
+use crate::proc::{pid_alive, restart_backoff, send_signal, HEALTHY_UPTIME};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,13 +127,23 @@ async fn lock_state<'a>() -> tokio::sync::MutexGuard<'a, Option<State>> {
 /// "do the right thing" entry point — call this after every admin
 /// mutation that touches the dns_bundle row.
 pub async fn ensure_running() -> Result<()> {
+    // Manual reconcile: clean slate for both children's crash-loop counters.
+    ensure_running_inner(true).await
+}
+
+/// `reset_crash = false` is used by the watchdog restart path so a
+/// spawn-then-quickly-exit child keeps accumulating `restart_attempts` instead
+/// of resetting to zero on every respawn (which would defeat the backoff and
+/// give-up cap). Only the child actually being respawned is affected — a
+/// still-running sibling takes the early SIGHUP-reload path before any reset.
+async fn ensure_running_inner(reset_crash: bool) -> Result<()> {
     let bundle = db::get_dns_bundle().context("get_dns_bundle")?;
 
     // Reconcile each child independently so a misconfigured tor
     // doesn't take dnscrypt-proxy with it. Errors are joined into the
     // combined Result so the caller learns about both.
-    let dn_res = reconcile_dnscrypt(&bundle).await;
-    let tor_res = reconcile_tor(&bundle).await;
+    let dn_res = reconcile_dnscrypt(&bundle, reset_crash).await;
+    let tor_res = reconcile_tor(&bundle, reset_crash).await;
     match (dn_res, tor_res) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(d), Ok(())) => Err(d.context("dnscrypt-proxy reconcile")),
@@ -194,7 +204,7 @@ pub async fn shutdown_for_exit() {
 // dnscrypt-proxy reconcile
 // ---------------------------------------------------------------------------
 
-async fn reconcile_dnscrypt(bundle: &db::DnsBundle) -> Result<()> {
+async fn reconcile_dnscrypt(bundle: &db::DnsBundle, reset_crash: bool) -> Result<()> {
     if let Some(reason) = should_dnscrypt_remain_disabled(bundle) {
         stop_if_running(ChildKind::Dnscrypt, &reason).await;
         return Ok(());
@@ -226,7 +236,11 @@ async fn reconcile_dnscrypt(bundle: &db::DnsBundle) -> Result<()> {
         started_at: Instant::now(),
         shutdown_requested: shutdown_requested.clone(),
     });
-    state.dnscrypt.crash = CrashState::default();
+    if reset_crash {
+        state.dnscrypt.crash = CrashState::default();
+    } else {
+        state.dnscrypt.crash.last_error = None;
+    }
     state.dnscrypt.disabled_reason = None;
     drop(guard);
     spawn_watchdog(ChildKind::Dnscrypt, child, shutdown_requested);
@@ -270,7 +284,7 @@ async fn write_dnscrypt_config(bundle: &db::DnsBundle) -> Result<PathBuf> {
 // tor reconcile
 // ---------------------------------------------------------------------------
 
-async fn reconcile_tor(bundle: &db::DnsBundle) -> Result<()> {
+async fn reconcile_tor(bundle: &db::DnsBundle, reset_crash: bool) -> Result<()> {
     if let Some(reason) = should_tor_remain_disabled(bundle) {
         stop_if_running(ChildKind::Tor, &reason).await;
         return Ok(());
@@ -329,7 +343,11 @@ async fn reconcile_tor(bundle: &db::DnsBundle) -> Result<()> {
         started_at: Instant::now(),
         shutdown_requested: shutdown_requested.clone(),
     });
-    state.tor.crash = CrashState::default();
+    if reset_crash {
+        state.tor.crash = CrashState::default();
+    } else {
+        state.tor.crash.last_error = None;
+    }
     state.tor.disabled_reason = None;
     drop(guard);
     spawn_watchdog(ChildKind::Tor, child, shutdown_requested);
@@ -387,6 +405,7 @@ async fn spawn(kind: ChildKind, bin: &PathBuf, argv: Vec<String>) -> Result<Chil
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
+    crate::proc::harden_child(&mut cmd);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {} ({})", kind.name(), bin.display()))?;
@@ -569,6 +588,9 @@ fn spawn_watchdog(kind: ChildKind, mut child: Child, shutdown_requested: Arc<Ato
                 ChildKind::Dnscrypt => &mut state.dnscrypt,
                 ChildKind::Tor => &mut state.tor,
             };
+            if started_at.elapsed() >= HEALTHY_UPTIME {
+                slot.crash.restart_attempts = 0;
+            }
             slot.crash.restart_attempts += 1;
             slot.crash.last_error = Some(format!(
                 "exited after {:?}: {exit_str}",
@@ -594,7 +616,8 @@ fn spawn_watchdog(kind: ChildKind, mut child: Child, shutdown_requested: Arc<Ato
         );
         sleep(backoff).await;
 
-        if let Err(e) = ensure_running().await {
+        // `false` = don't reset the crash counter — this is a restart.
+        if let Err(e) = ensure_running_inner(false).await {
             tracing::error!(kind = kind.name(), error = ?e, "restart failed");
         }
     });

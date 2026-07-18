@@ -25,7 +25,7 @@
 //!    admin API) we POST/PATCH/DELETE through telemt's `/v1/users` to
 //!    converge on the DB roster.
 
-use crate::proc::{pid_alive, restart_backoff, send_signal};
+use crate::proc::{pid_alive, restart_backoff, send_signal, HEALTHY_UPTIME};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,6 +93,15 @@ async fn lock_state<'a>() -> tokio::sync::MutexGuard<'a, Option<State>> {
 /// "do the right thing" entry point — call after every admin mutation
 /// that could affect the proxy.
 pub async fn ensure_running() -> Result<()> {
+    // Manual reconcile: clean slate for the crash-loop counter.
+    ensure_running_inner(true).await
+}
+
+/// `reset_crash = false` is used by the watchdog restart path so a
+/// spawn-then-quickly-exit child keeps accumulating `restart_attempts` (so the
+/// backoff escalates and the give-up cap is reachable) instead of resetting to
+/// zero on every respawn.
+async fn ensure_running_inner(reset_crash: bool) -> Result<()> {
     let inbound = db::get_mtproxy_inbound().context("get_mtproxy_inbound")?;
 
     if let Some(reason) = should_remain_disabled(&inbound) {
@@ -136,7 +145,11 @@ pub async fn ensure_running() -> Result<()> {
             started_at: Instant::now(),
             shutdown_requested: shutdown_requested.clone(),
         });
-        state.crash = CrashState::default();
+        if reset_crash {
+            state.crash = CrashState::default();
+        } else {
+            state.crash.last_error = None;
+        }
         state.disabled_reason = None;
     }
     spawn_watchdog(child, shutdown_requested);
@@ -232,6 +245,7 @@ async fn spawn(bin: &PathBuf, config: &PathBuf) -> Result<Child> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
+    crate::proc::harden_child(&mut cmd);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
@@ -346,6 +360,9 @@ fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
         let attempts = {
             let mut guard = lock_state().await;
             let state = guard.as_mut().expect("state initialised");
+            if started_at.elapsed() >= HEALTHY_UPTIME {
+                state.crash.restart_attempts = 0;
+            }
             state.crash.restart_attempts += 1;
             state.crash.last_error = Some(format!(
                 "exited after {:?}: {exit_str}",
@@ -362,7 +379,8 @@ fn spawn_watchdog(mut child: Child, shutdown_requested: Arc<AtomicBool>) {
         tracing::info!(attempts, backoff_ms = backoff.as_millis() as u64, "scheduling telemt restart");
         sleep(backoff).await;
 
-        if let Err(e) = ensure_running().await {
+        // `false` = don't reset the crash counter — this is a restart.
+        if let Err(e) = ensure_running_inner(false).await {
             tracing::error!(error = ?e, "telemt restart failed");
         }
     });

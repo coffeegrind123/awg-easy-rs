@@ -38,10 +38,10 @@ pub async fn setup_step2(
         return Err(api_err(StatusCode::BAD_REQUEST, "Passwords do not match"));
     }
 
-    if body.password.len() < 6 {
+    if body.password.chars().count() < 12 {
         return Err(api_err(
             StatusCode::BAD_REQUEST,
-            "Password must be at least 6 characters",
+            "Password must be at least 12 characters",
         ));
     }
 

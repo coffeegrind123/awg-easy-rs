@@ -1,5 +1,10 @@
 # Stage 1: Build the Rust binary
-FROM rust:alpine AS builder
+#
+# Base images are pinned by digest for reproducible, tamper-evident builds — a
+# floating `:alpine` tag can silently change the toolchain (or be repointed by
+# a registry compromise) between builds. Refresh the digests deliberately when
+# bumping the toolchain (`docker buildx imagetools inspect rust:1-alpine`).
+FROM rust:1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS builder
 WORKDIR /build
 
 # Install build dependencies
@@ -39,24 +44,38 @@ RUN cargo build --release --target x86_64-unknown-linux-musl && \
     cp target/x86_64-unknown-linux-musl/release/awg-easy-rs /build/awg-easy-rs
 
 # Stage 2: Build amneziawg-go (needs Go >= 1.24)
-FROM golang:alpine AS awg-go-builder
+FROM golang:1-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS awg-go-builder
 WORKDIR /build
 RUN apk add --no-cache git make
-RUN git clone https://github.com/amnezia-vpn/amneziawg-go.git && \
-    cd amneziawg-go && make
+# Pin to a release tag AND assert the resolved commit SHA. `--branch <tag>`
+# alone is not enough — a tag is mutable and could be repointed upstream; the
+# SHA assertion is the actual supply-chain integrity check. Bump both together.
+ARG AWG_GO_TAG=v0.2.19
+ARG AWG_GO_SHA=1cc94272ca8e9e223a5fe76382f5880f09d3c12d
+RUN git clone --depth 1 --branch "$AWG_GO_TAG" https://github.com/amnezia-vpn/amneziawg-go.git && \
+    cd amneziawg-go && \
+    got="$(git rev-parse HEAD)" && \
+    [ "$got" = "$AWG_GO_SHA" ] || { echo "amneziawg-go SHA mismatch: got $got, want $AWG_GO_SHA" >&2; exit 1; } && \
+    make
 
 # Stage 3: Build amneziawg-tools
-FROM alpine:3.21 AS awg-builder
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS awg-builder
 WORKDIR /build
 
 RUN apk add --no-cache git build-base linux-headers
 
-# Build amneziawg-tools (awg and awg-quick)
-RUN git clone https://github.com/amnezia-vpn/amneziawg-tools.git && \
-    cd amneziawg-tools/src && make
+# Build amneziawg-tools (awg and awg-quick). Pinned to a release tag + asserted
+# commit SHA (see the amneziawg-go stage for the rationale).
+ARG AWG_TOOLS_TAG=v1.0.20260618-2
+ARG AWG_TOOLS_SHA=61e741780e8465a67a7d7fb6cffe14a8a15d624a
+RUN git clone --depth 1 --branch "$AWG_TOOLS_TAG" https://github.com/amnezia-vpn/amneziawg-tools.git && \
+    cd amneziawg-tools && \
+    got="$(git rev-parse HEAD)" && \
+    [ "$got" = "$AWG_TOOLS_SHA" ] || { echo "amneziawg-tools SHA mismatch: got $got, want $AWG_TOOLS_SHA" >&2; exit 1; } && \
+    cd src && make
 
 # Stage 4: Minimal runtime
-FROM alpine:3.21
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 WORKDIR /app
 
 # Install runtime dependencies. We use nftables natively now —

@@ -361,8 +361,8 @@ async fn sql_injection_setup_username() {
     // as a literal username, not executed.
     let body = json!({
         "username": "x'; DROP TABLE users;--",
-        "password": "password123",
-        "confirmPassword": "password123"
+        "password": "password1234",
+        "confirmPassword": "password1234"
     });
     let req = Request::builder()
         .method("POST")
