@@ -6,8 +6,6 @@
 //! parallel Rust implementation. UUIDs and short-IDs are generated locally
 //! since `OsRng` is the same source `xray uuid` would use anyway.
 
-use rand::Rng;
-
 // anyhow/Result are only used by the x25519 keypair path (the bundled-binary
 // shell-out and its parser/tests); the local UUID/short-id/path generators
 // below are infallible. Gate the import so a non-bundled, non-test build
@@ -135,7 +133,7 @@ pub fn generate_uuid() -> String {
 /// and which gives enough entropy that two random clients won't collide.
 pub fn generate_short_id() -> String {
     let mut bytes = [0u8; 8];
-    rand::rngs::OsRng.fill(&mut bytes[..]);
+    crate::rng::fill(&mut bytes[..]);
     hex::encode(bytes)
 }
 
@@ -145,7 +143,7 @@ pub fn generate_short_id() -> String {
 /// path because Xray's xhttpSettings.path expects a real URL path.
 pub fn generate_xhttp_path() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill(&mut bytes[..]);
+    crate::rng::fill(&mut bytes[..]);
     format!("/{}", hex::encode(bytes))
 }
 

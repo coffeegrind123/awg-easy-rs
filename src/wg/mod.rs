@@ -216,14 +216,14 @@ pub async fn restart_async() -> Result<()> {
 pub fn cron_job() -> Result<()> {
     let clients = crate::db::get_all_clients()?;
     let mut needs_save = false;
-    let now = chrono::Utc::now();
+    let now = crate::datetime::now_utc();
 
     for client in &clients {
         if !client.enabled {
             continue;
         }
         if let Some(ref expires) = client.expires_at {
-            if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(expires) {
+            if let Some(exp) = crate::datetime::parse_rfc3339(expires) {
                 if now > exp {
                     tracing::info!("Client {} ({}) expired, disabling", client.id, client.name);
                     crate::db::toggle_client(client.id, false)?;

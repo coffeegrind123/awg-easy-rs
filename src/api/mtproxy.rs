@@ -28,7 +28,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -673,7 +672,7 @@ fn validate_username(name: &str) -> Result<(), (StatusCode, Json<Value>)> {
 /// MTProto secret format — same length and encoding @MTProxybot uses.
 fn generate_secret_hex() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    crate::rng::fill(&mut bytes);
     hex::encode(bytes)
 }
 

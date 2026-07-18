@@ -6,7 +6,7 @@
 //! - H1-H4: magic header values (must be distinct)
 //! - I1-I5: init packet junk payload (optional large hex blobs)
 
-use rand::Rng;
+use crate::rng;
 use serde::{Serialize, Deserialize};
 
 /// Complete set of AmneziaWG obfuscation parameters.
@@ -57,21 +57,25 @@ pub struct AwgParams {
 /// - H1-H4: distinct values in [5, 2147483647] (awg-go accepts both single values and ranges)
 /// - I1: random tagged blob per amnezia-client default format
 pub fn generate_awg_params() -> AwgParams {
-    let mut rng = rand::thread_rng();
+    // Small helpers over the OS CSPRNG (src/rng.rs), returning `i32` to match
+    // the AwgParams fields. These are obfuscation parameters, not keys, but an
+    // unbiased draw is still wanted so the header/junk-size distribution can't
+    // be fingerprinted; `rng::range_incl_i64` rejection-samples to guarantee it.
+    let gen_incl = |lo: i64, hi: i64| -> i32 { rng::range_incl_i64(lo, hi) as i32 };
 
-    let jc = rng.gen_range(4..=12);
-    let jmin = rng.gen_range(8..=80);
+    let jc = gen_incl(4, 12);
+    let jmin = gen_incl(8, 80);
     // Spec: Jmax < 1280 (strict). We cap at 1279 to stay inside the spec
     // while still avoiding fragmentation against the default 1420 MTU.
-    let jmax = rng.gen_range((jmin + 1).max(1)..=1279);
+    let jmax = gen_incl(i64::from(jmin + 1).max(1), 1279);
     // awg-easy's default draws S1/S2 from 15..=150. The spec hard caps
     // (1132 / 1188) are larger and enforced in `validate_awg_params`, so 150
     // is always the effective upper bound when generating — the previous
     // `150.min(1132)` was a no-op that read as a real clamp.
-    let s1 = rng.gen_range(15..=150);
+    let s1 = gen_incl(15, 150);
     // Retry s2 until the spec rule `s1 + 56 != s2` is satisfied.
     let s2 = loop {
-        let candidate = rng.gen_range(15..=150);
+        let candidate = gen_incl(15, 150);
         if candidate != s1 + 56 {
             break candidate;
         }
@@ -85,8 +89,8 @@ pub fn generate_awg_params() -> AwgParams {
     // "S1‑S4" obfuscation set — every fresh interface now ships a full
     // 2.0 padding profile. Regenerate until the pair is collision-free.
     let (s3, s4) = loop {
-        let a = rng.gen_range(15..=150);
-        let b = rng.gen_range(15..=150);
+        let a = gen_incl(15, 150);
+        let b = gen_incl(15, 150);
         if a + 56 != b && b + 56 != a {
             break (a, b);
         }
@@ -100,12 +104,12 @@ pub fn generate_awg_params() -> AwgParams {
     const H_MIN: i64 = 5;
     const H_MAX: i64 = 2_147_483_647;
     let mut splits: Vec<i64> = (0..8)
-        .map(|_| rng.gen_range(H_MIN..H_MAX))
+        .map(|_| rng::range_excl_i64(H_MIN, H_MAX))
         .collect();
     splits.sort_unstable();
     splits.dedup();
     while splits.len() < 8 {
-        let v = rng.gen_range(H_MIN..H_MAX);
+        let v = rng::range_excl_i64(H_MIN, H_MAX);
         if !splits.contains(&v) {
             splits.push(v);
             splits.sort_unstable();
@@ -124,7 +128,7 @@ pub fn generate_awg_params() -> AwgParams {
 
     // Generate random I1 in amnezia-client tag format:
     // <r 2> = 2 random bytes, <b 0x...> = static hex blob
-    let random_hex: String = (0..48).map(|_| format!("{:02x}", rng.gen::<u8>())).collect();
+    let random_hex: String = (0..48).map(|_| format!("{:02x}", rng::byte())).collect();
     let i1 = format!("<r 2><b 0x{}>", random_hex);
 
     AwgParams {

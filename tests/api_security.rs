@@ -1525,7 +1525,9 @@ async fn cron_disables_expired_client() {
     let cid = create_client(Some(admin_id), "exp", "10.8.0.10");
 
     // Stamp an expiry one hour in the past, then run the expiry cron.
-    let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let past = awg_easy_rs::datetime::to_rfc3339(
+        awg_easy_rs::datetime::now_utc() - time::Duration::hours(1),
+    );
     let mut f = db::UpdateMap::new();
     f.insert("expires_at".into(), past);
     db::update_client(cid, &f).unwrap();

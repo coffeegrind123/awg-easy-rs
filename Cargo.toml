@@ -3,16 +3,19 @@ name = "awg-easy-rs"
 version = "0.1.0"
 edition = "2021"
 description = "Standalone AmneziaWG VPN manager with Web UI - pure Rust rewrite of awg-easy"
+license = "MIT"
 
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP server
+# HTTP server. `tower` and `tower-http` are intentionally absent: no
+# middleware layers, CORS, or ServeDir are used (static assets are baked
+# in via include_bytes! in main.rs), and axum pulls the tower-layer/
+# tower-service traits it needs on its own. `tower` remains a dev-dependency
+# for the test harness's ServiceExt::oneshot.
 axum = { version = "0.7", features = ["macros"] }
 axum-extra = { version = "0.9", features = ["cookie"] }
-tower = "0.5"
-tower-http = { version = "0.5", features = ["cors", "fs", "auth"] }
 
 # Database. `backup` enables the SQLite online-backup API used by the
 # in-memory mode to snapshot the RAM database to a durable file and to
@@ -26,22 +29,32 @@ serde_json = "1"
 # Crypto
 argon2 = "0.5"
 sha2 = "0.10"
+# HMAC-SHA1 for our in-house RFC 6238 TOTP (src/api/session.rs::hotp_sha1).
+# Same RustCrypto family as sha2; replaces the totp-rs crate, which only
+# ever computed this one primitive yet dragged in the entire url/idna/ICU
+# tree via its (unused) `otpauth` feature.
+hmac = "0.12"
+sha1 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-rand = "0.8"
+# OS CSPRNG only (see src/rng.rs) — replaces the `rand` crate, whose userspace
+# generator (rand_chacha/ppv-lite86 + a second getrandom/rand_core line) we
+# never used. Pinned to 0.2 to unify with argon2's password-hash, adding no
+# new crate to the graph.
+getrandom = "0.2"
 
 # QR codes
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
-# Time
-chrono = { version = "0.4", features = ["serde"] }
-time = "0.3"
+# Time. `time` is already mandatory (axum-extra's cookie jar), so all date
+# handling routes through it — see src/datetime.rs — instead of pulling
+# chrono's separate subtree. `formatting`/`parsing` drive RFC 3339 + the
+# datetime-local expiry shapes; `macros` compiles the two custom format
+# descriptions at build time.
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 
 # Networking
 ipnet = "2"
-
-# TOTP 2FA
-totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 
 # UUID for one-time links
 uuid = { version = "1", features = ["v4"] }
@@ -57,8 +70,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
-webpki-roots = "0.26"
-x509-parser = "0.16"
+webpki-roots = "1"
 
 # SIGHUP/SIGTERM to the supervised Xray child. tokio::process only
 # offers SIGKILL natively; we need finer-grained signalling for

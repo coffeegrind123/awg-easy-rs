@@ -6,6 +6,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod datetime;
 pub mod db;
 pub mod dns;
 pub mod firewall;
@@ -16,5 +17,6 @@ pub mod mtproxy;
 pub mod proc;
 pub mod proxy;
 pub mod qr;
+pub mod rng;
 pub mod wg;
 pub mod xray;
