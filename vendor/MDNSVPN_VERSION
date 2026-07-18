@@ -8,7 +8,7 @@
 # Upstream: https://github.com/masterking32/MasterDnsVPN
 # Release asset: MasterDnsVPN_Server_Linux_AMD64.tar.gz
 
-MDNSVPN_VERSION=v2026.05.10.180256-27c7e11
+MDNSVPN_VERSION = v2026.06.13.234407-7de2476
 
 # SHA-256 of the *stripped* MasterDnsVPN server ELF. The runtime extractor
 # uses this to skip re-extraction when the on-disk file already matches.
@@ -19,4 +19,4 @@ MDNSVPN_VERSION=v2026.05.10.180256-27c7e11
 # vendor/update.sh strips debug info before gzipping to keep the bundled blob
 # under ~2 MB instead of the 6.6 MB unstripped form.
 
-MDNSVPN_AMD64_SHA256=c596b64374155a61689c5739b7c77fcf918ff7f6cb588016ac2912eba2f8fd80
+MDNSVPN_AMD64_SHA256 = aebb7eb879c742135327b147f66e267e1587c47c9043de9a41811fe3eec8c126
